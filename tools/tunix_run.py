@@ -42,6 +42,26 @@ if os.environ.get("TUNIX_ALGO", "grpo") == "ppo":
         self._rollout_micro_batch_size, self._compute_logps_micro_batch_size = saved
 
     ppo_learner.PPOLearner._generate_and_compute_advantage = _gen_adv_grouped  # pylint: disable=protected-access
+
+  # Tunix runs the critic's value pass on the whole rollout batch at once (every other pass is micro-batched),
+  # so its activations scale with the total rollout count and it is the first thing to OOM at long context.
+  # Run it in slices of CRITIC_MICRO sequences (default: one prompt's group) and concatenate; values are
+  # per-sequence, so the result is identical.
+  from tunix.rl import rl_cluster as _rl_cluster_v  # pylint: disable=g-import-not-at-top
+  import jax.numpy as _jnp  # pylint: disable=g-import-not-at-top
+  _critic_micro = int(os.environ.get("CRITIC_MICRO") or os.environ.get("PPO_GROUP") or 8)
+  _orig_get_values = _rl_cluster_v.RLEngine.get_values
+
+  def _get_values_micro(self, prompt_tokens, completion_tokens, pad_id, eos_id):
+    n = prompt_tokens.shape[0]
+    if n <= _critic_micro:
+      return _orig_get_values(self, prompt_tokens, completion_tokens, pad_id, eos_id)
+    return _jnp.concatenate([
+        _orig_get_values(self, prompt_tokens[i:i + _critic_micro], completion_tokens[i:i + _critic_micro],
+                         pad_id, eos_id)
+        for i in range(0, n, _critic_micro)], axis=0)
+
+  _rl_cluster_v.RLEngine.get_values = _get_values_micro
   if os.environ.get("SINGLE_HOST") != "1":
     # PPO takes old-policy logps from the rollout engine; with per-host vLLM replicas (tunix_multihost_vllm)
     # that returns an empty array. Compute them with the trainer's actor instead (as verl does); with one
