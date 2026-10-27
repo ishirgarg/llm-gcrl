@@ -1,1 +1,17 @@
 tpu_setup.sh
+site.env
+# kept local only (not needed on the TPU VMs)
+README.md
+RESULTS.md
+RL_RECIPES.md
+plots/
+tools/plot_results.py
+scripts/verl/
+tools/verl_polaris.py
+scripts/maxtext/grpo_math.sh
+scripts/maxtext/convert_qwen3_4b.sh
+tools/maxtext_*.py
+configs/maxtext/
+scripts/tunix/ppo_math.sh
+configs/tunix/ppo_qwen3_4b_polaris.yaml
+scripts/maxtext/

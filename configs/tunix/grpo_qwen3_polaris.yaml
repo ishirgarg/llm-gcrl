@@ -1,0 +1,66 @@
+# Tunix GRPO on POLARIS-53K with vLLM (tpu-inference) rollouts. Overrides tunix/cli/base_config.yaml.
+# Same prompt (tools/polaris_data.py) and reward (tools/math_reward.py) as the SkyRL runs.
+# Model, mesh, batch, lengths, LoRA vs full fine-tuning and paths are set by scripts/tunix/grpo_math.sh.
+model_config:
+  model_source: "huggingface"
+  use_flash_attention: true
+  flash_attention_block_size: 256
+  remat_config: 3
+  rng_seed: 42
+actor_model_config:
+  mesh:
+    shape: "(1,4)"
+    axis_names: "('fsdp','tp')"
+reference_model_config:
+  mesh: null
+  same_mesh_as: "actor"
+rollout_model_config:      # colocated: vLLM shares the trainer's chips (vllm_config.hbm_utilization splits HBM)
+  mesh: null
+  same_mesh_as: "actor"
+tokenizer_config:
+  tokenizer_type: "huggingface"
+  add_bos: False
+data_module: "polaris_data"   # tools/polaris_data.py (tools/ is on sys.path via tools/tunix_run.py)
+apply_chat_template_to_dataset: false
+batch_size: 16
+num_test_batches: 0
+num_train_epochs: 1
+rl_training_config:
+  actor_optimizer_config:
+    opt_type: "adamw"
+    peak_value: 3e-6
+    schedule_type: "warmup_cosine_decay_schedule"
+    init_value: 0.0
+    end_value: 0.0
+    warmup_ratio: 0.1
+    warmup_steps: 1
+    decay_steps: 10
+    b1: 0.9
+    b2: 0.99
+    weight_decay: 0.1
+    max_grad_norm: 0.1
+  eval_every_n_steps: 1000
+  mini_batch_size: 16          # prompts per policy update (one update per step)
+  train_micro_batch_size: 4
+  metrics_logging_options:
+    project_name: "llm-gcrl"
+    flush_every_n_steps: 1
+  checkpointing_options:
+    save_interval_steps: 1000
+    max_to_keep: 1
+  profiler_options: {}
+rollout_config:
+  temperature: 1.0
+  top_p: 1.0
+  top_k: null
+rollout_engine: "vllm"
+vllm_config:
+  hbm_utilization: 0.4
+  async_scheduling: true
+offload_to_cpu: false
+grpo_config:
+  num_generations: 8
+  num_iterations: 1
+  beta: 0.08
+  epsilon: 0.2
+reward_functions: []   # set by scripts/tunix/grpo_math.sh ($REPO/tools/math_reward.py)
