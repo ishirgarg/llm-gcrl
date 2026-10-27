@@ -69,7 +69,8 @@ if [ "$FORCE_FULL" = 1 ]; then
   FORCE_ARGS=("rollout_config.rollout_vllm_sampling_kwargs={'min_tokens': $MAX_TOKENS}")
 fi
 if [ "$MODE" = lora ]; then
-  LORA_ARGS=("actor_model_config.lora_config={'rank': 32, 'alpha': 64.0, 'module_path': '.*q_proj|.*k_proj|.*v_proj|.*o_proj|.*gate_proj|.*up_proj|.*down_proj'}")
+  export LORA_RANK=32 LORA_ALPHA=64.0   # tools/tunix_run.py merges LoRA into the weights synced to vLLM with alpha/rank
+  LORA_ARGS=("actor_model_config.lora_config={'rank': $LORA_RANK, 'alpha': $LORA_ALPHA, 'module_path': '.*q_proj|.*k_proj|.*v_proj|.*o_proj|.*gate_proj|.*up_proj|.*down_proj'}")
 fi
 
 source "$NFS_ROOT/venvs/maxtext/bin/activate"

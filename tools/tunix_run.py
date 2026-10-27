@@ -77,6 +77,68 @@ if os.environ.get("TUNIX_ALGO", "grpo") == "ppo":
 else:
   from tunix.cli import grpo_main as entry  # pylint: disable=g-import-not-at-top
 
+def _patch_lora_merged_sync():
+  """Sync LoRA training to vLLM as merged full weights.
+
+  With LoRA, Tunix's RLEngine.sync_weights sends only the LoRAParam tensors; vLLM loads them only if it was built
+  with LoRA support (vllm_config.lora_config + LoRA key mappings). Without that they are dropped ("No mapping for
+  source key: ...w_lora_a") and rollouts keep using the base model. Instead send W + (alpha / rank) * A @ B for
+  every LoRA-wrapped weight through the regular full-weight path (the same math as Tunix's
+  save_lora_merged_model_as_safetensors), so vLLM always samples from the current policy.
+  """
+  import flax.nnx as nnx  # pylint: disable=g-import-not-at-top
+  import jax  # pylint: disable=g-import-not-at-top,redefined-outer-name,reimported
+  from tunix.rl import rl_cluster as _rc  # pylint: disable=g-import-not-at-top
+  from tunix.rl import utils as rl_utils  # pylint: disable=g-import-not-at-top
+  from tunix.sft import utils as sft_utils  # pylint: disable=g-import-not-at-top
+
+  scale = float(os.environ.get("LORA_ALPHA", 64.0)) / float(os.environ.get("LORA_RANK", 32))
+  orig_sync = _rc.RLEngine.sync_weights
+
+  def merged_param_state(model):
+    """Flat {path tuple: array} of all nnx.Param weights, with LoRA deltas merged in (sync accepts a flat dict)."""
+    flat = {tuple(k): (v.value if hasattr(v, "value") else v) for k, v in nnx.to_flat_state(nnx.state(model, nnx.Param))}
+    pairs = {}
+    for path, value in nnx.iter_graph(model):
+      if isinstance(value, nnx.LoRAParam):
+        name = str(path[-1])
+        base = name.replace("_lora_a", "").replace("_lora_b", "")
+        pairs.setdefault(tuple(path[:-1]) + (base,), {})["a" if "lora_a" in name else "b"] = (
+            value.value if hasattr(value, "value") else value)
+    norm = {tuple(str(p) for p in k): k for k in flat}
+    merged = 0
+    for base_path, ab in pairs.items():
+      key = norm.get(tuple(str(p) for p in base_path))
+      if key is None or "a" not in ab or "b" not in ab:
+        raise RuntimeError(f"LoRA merge: no base weight for {base_path}")
+      w, a, b = flat[key], ab["a"], ab["b"]
+      r = a.shape[-1]
+      delta = (a.reshape(-1, r) @ b.reshape(r, -1)).reshape(w.shape) * scale
+      flat[key] = w + delta.astype(w.dtype)
+      merged += 1
+    # dotted string keys: tuple keys mix str/int, which jax cannot sort when walking the dict as a pytree
+    return {".".join(str(p) for p in k): v for k, v in flat.items()}, merged
+
+  def sync_weights_merged(self):
+    if not sft_utils.is_lora_enabled(self.actor_trainer.model):
+      return orig_sync(self)
+    merged_state, n = merged_param_state(self.actor_trainer.model)
+    if not getattr(self, "_lora_merge_logged", False):
+      print(f"[tunix_run] LoRA weight sync: merged {n} LoRA layers into base weights (scale {scale})", flush=True)
+      self._lora_merge_logged = True
+    self.rollout.update_params(merged_state, (nnx.Param,))
+    del merged_state
+    if self.cluster_config.gc_collect_after_weight_sync:
+      import gc  # pylint: disable=g-import-not-at-top
+      gc.collect()
+    self._anchor_policy_state = rl_utils.put_params_on_memory_kind(
+        nnx.state(self.actor_trainer.model), "pinned_host")
+    self.global_steps += 1
+
+  _rc.RLEngine.sync_weights = sync_weights_merged
+
+
+_patch_lora_merged_sync()  # before tunix_eff wraps sync_weights, so its timing includes the merge
 tunix_eff.install()
 
 
