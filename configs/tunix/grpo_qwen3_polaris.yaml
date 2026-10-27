@@ -57,6 +57,11 @@ rollout_engine: "vllm"
 vllm_config:
   hbm_utilization: 0.4
   async_scheduling: true
+  kwargs:   # Tunix CLI default + prefix caching OFF: with 8 identical prompts per group, cache hits make
+            # tiny (2-token) prefills that crashed tpu-inference on v5e-32 at step 1 (process 5, every run)
+    kv_cache_metrics: true
+    disable_log_stats: false
+    enable_prefix_caching: false
 offload_to_cpu: false
 grpo_config:
   num_generations: 8
