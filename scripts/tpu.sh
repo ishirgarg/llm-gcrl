@@ -14,10 +14,12 @@
 set -euo pipefail
 
 # TPU, ZONE, NUM_WORKERS and NFS_ROOT come from the git-ignored site.env at the repo root (see site.env.example).
+# A TPU=... / NUM_WORKERS=... already in the environment wins over site.env (drive several slices at once).
+_tpu_override=${TPU:-}; _nw_override=${NUM_WORKERS:-}
 source "$(git -C "$(dirname "$0")" rev-parse --show-toplevel)/site.env"
-TPU=${TPU:?set TPU in site.env}
+TPU=${_tpu_override:-${TPU:?set TPU in site.env}}
+NUM_WORKERS=${_nw_override:-${NUM_WORKERS:-8}}
 ZONE=${ZONE:?set ZONE in site.env}
-NUM_WORKERS=${NUM_WORKERS:-8}
 REPO=$NFS_ROOT/llm-gcrl
 LOG_ROOT=$NFS_ROOT/logs
 
