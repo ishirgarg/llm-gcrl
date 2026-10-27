@@ -89,7 +89,6 @@ def _patch_lora_merged_sync():
   import flax.nnx as nnx  # pylint: disable=g-import-not-at-top
   import jax  # pylint: disable=g-import-not-at-top,redefined-outer-name,reimported
   from tunix.rl import rl_cluster as _rc  # pylint: disable=g-import-not-at-top
-  from tunix.rl import utils as rl_utils  # pylint: disable=g-import-not-at-top
   from tunix.sft import utils as sft_utils  # pylint: disable=g-import-not-at-top
 
   scale = float(os.environ.get("LORA_ALPHA", 64.0)) / float(os.environ.get("LORA_RANK", 32))
@@ -97,7 +96,8 @@ def _patch_lora_merged_sync():
 
   def merged_param_state(model):
     """Flat {path tuple: array} of all nnx.Param weights, with LoRA deltas merged in (sync accepts a flat dict)."""
-    flat = {tuple(k): (v.value if hasattr(v, "value") else v) for k, v in nnx.to_flat_state(nnx.state(model, nnx.Param))}
+    flat = {tuple(k): (v.value if hasattr(v, "value") else v) for k, v in nnx.to_flat_state(nnx.state(model, nnx.Param))
+            if not isinstance(v, nnx.LoRAParam) and "lora" not in str(k[-1])}  # LoRAParam subclasses Param
     pairs = {}
     for path, value in nnx.iter_graph(model):
       if isinstance(value, nnx.LoRAParam):
@@ -120,20 +120,25 @@ def _patch_lora_merged_sync():
     return {".".join(str(p) for p in k): v for k, v in flat.items()}, merged
 
   def sync_weights_merged(self):
+    # Wrap the installed sync_weights (keeps its bookkeeping: step counter, anchor state, gc) and only swap the
+    # payload it hands to the rollout: the merged full weights instead of the LoRA tensors.
     if not sft_utils.is_lora_enabled(self.actor_trainer.model):
       return orig_sync(self)
-    merged_state, n = merged_param_state(self.actor_trainer.model)
-    if not getattr(self, "_lora_merge_logged", False):
-      print(f"[tunix_run] LoRA weight sync: merged {n} LoRA layers into base weights (scale {scale})", flush=True)
-      self._lora_merge_logged = True
-    self.rollout.update_params(merged_state, (nnx.Param,))
-    del merged_state
-    if self.cluster_config.gc_collect_after_weight_sync:
-      import gc  # pylint: disable=g-import-not-at-top
-      gc.collect()
-    self._anchor_policy_state = rl_utils.put_params_on_memory_kind(
-        nnx.state(self.actor_trainer.model), "pinned_host")
-    self.global_steps += 1
+    rollout = self.rollout
+    orig_update = rollout.update_params
+
+    def update_with_merged(params, filter_types=None):  # pylint: disable=unused-argument
+      merged_state, n = merged_param_state(self.actor_trainer.model)
+      if not getattr(self, "_lora_merge_logged", False):
+        print(f"[tunix_run] LoRA weight sync: merged {n} LoRA layers into base weights (scale {scale})", flush=True)
+        self._lora_merge_logged = True
+      return orig_update(merged_state, (nnx.Param,))
+
+    rollout.update_params = update_with_merged
+    try:
+      return orig_sync(self)
+    finally:
+      del rollout.update_params  # back to the class method
 
   _rc.RLEngine.sync_weights = sync_weights_merged
 
