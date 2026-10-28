@@ -8,7 +8,9 @@ samples; these frameworks don't pass truncation info to reward functions, so onl
 """
 import concurrent.futures
 import importlib.util
+import json
 import os
+import time
 
 _GRADING = os.path.join(os.environ["NFS_ROOT"], "third_party/tinker-cookbook/tinker_cookbook/recipes/math_rl/math_grading.py")
 _spec = importlib.util.spec_from_file_location("cookbook_math_grading", _GRADING)
@@ -32,9 +34,26 @@ def _score(completion: str, answer: str) -> float:
   return float(correct)
 
 
+def _log(scores):
+  """Per-call reward stats (= per training step) to $LOG_ROOT/$RUN_NAME/rewards.jsonl, written by worker 0 only."""
+  if os.environ.get("WORKER") not in ("w-0", None) or not os.environ.get("RUN_NAME") or not scores:
+    return
+  path = os.path.join(os.environ["LOG_ROOT"], os.environ["RUN_NAME"], "rewards.jsonl")
+  rec = {"time": round(time.time(), 1), "n": len(scores), "mean_reward": sum(scores) / len(scores),
+         "acc": sum(s == 1.0 for s in scores) / len(scores),
+         "boxed_rate": sum(s != -FORMAT_COEF for s in scores) / len(scores)}
+  try:
+    with open(path, "a") as f:
+      f.write(json.dumps(rec) + "\n")
+  except OSError:
+    pass
+
+
 def math_reward(prompts, completions, answer=None, **kwargs):
   """Tunix-style reward fn: (prompts, completions, answer, **kw) -> list[float]."""
   del prompts
   if answer is None:
     answer = kwargs["answers"]
-  return [_score(c, a) for c, a in zip(completions, answer)]
+  scores = [_score(c, a) for c, a in zip(completions, answer)]
+  _log(scores)
+  return scores

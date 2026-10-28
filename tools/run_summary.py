@@ -55,6 +55,11 @@ def main(d):
     print("  OOM", line)
   for line in err:
     print("  ERR", line)
+  if os.path.exists(f"{d}/rewards.jsonl"):
+    rs = [json.loads(line) for line in open(f"{d}/rewards.jsonl")]
+    blocks = [rs[i:i + 10] for i in range(0, len(rs), 10)]
+    print(f"  REWARD per 10 steps (n={len(rs)} steps):",
+          [round(statistics.mean(r["acc"] for r in b), 3) for b in blocks])
   if os.path.exists(f"{d}/eval.jsonl"):
     for line in open(f"{d}/eval.jsonl"):
       r = json.loads(line)
