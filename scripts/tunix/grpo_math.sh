@@ -36,11 +36,11 @@ BATCH=$(pick BATCH 16)                 # prompts per RL step
 GROUP=$(pick GROUP 8)                  # rollouts per prompt (GRPO group size)
 VLLM_MAX_SEQS=$(pick VLLM_MAX_SEQS $((BATCH * GROUP)))   # concurrent sequences (= rollouts per step)
 VLLM_MAX_BATCHED=$(pick VLLM_MAX_BATCHED 8192)   # tokens per vLLM forward (bounds prefill temporaries)
-# prompts (x GROUP sequences) per gradient micro-step. Default: as many as fit a token budget per micro-step
-# (64k tokens PPO, 32k GRPO, whose update needs ~3x more memory per sequence in Tunix), a divisor of BATCH. Bigger
-# micro-steps amortise the per-micro-step FSDP weight all-gathers: PPO at 1k, 1 -> 4 prompts: training 3.3x faster.
+# prompts (x GROUP sequences) per gradient micro-step. Default: as many as fit a 64k-token budget per micro-step,
+# a divisor of BATCH. Bigger micro-steps amortise the per-micro-step FSDP weight all-gathers: at 1k, 1 -> 4 prompts
+# makes training 2.7x (GRPO) to 3.3x (PPO) faster.
 SEQ_LEN=$(( $(pick MAX_PROMPT 768) + $(pick MAX_TOKENS 1024) ))
-case "$(pick ALGO grpo)" in ppo) MICRO_BUDGET=65536 ;; *) MICRO_BUDGET=32768 ;; esac
+MICRO_BUDGET=$(pick MICRO_BUDGET 65536)
 auto_micro=1
 for m in $(seq "$(pick BATCH 16)" -1 1); do
   if [ $(( $(pick BATCH 16) % m )) -eq 0 ] && [ $(( m * $(pick GROUP 8) * SEQ_LEN )) -le "$MICRO_BUDGET" ]; then auto_micro=$m; break; fi
