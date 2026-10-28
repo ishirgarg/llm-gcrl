@@ -39,8 +39,9 @@ free_tpu() {
   [ -n "$pids" ] && { log "killing TPU holders: $pids"; sudo kill -9 $pids 2>/dev/null; sleep 5; }
 }
 
-last_seq=$(cat "$STATE/current" 2>/dev/null | cut -d'|' -f1)
-[ "$W" = 0 ] && last_seq=""
+# A job announced before this worker started counts only if it is recent (worker 0 may come up first).
+started=$(date +%s)
+last_seq=""
 while true; do
   if [ "$W" = 0 ]; then
     git -C "$REPO" pull --ff-only -q 2>&1 | tail -2
@@ -51,7 +52,7 @@ while true; do
   else
     cur=$(cat "$STATE/current" 2>/dev/null)
     seq=${cur%%|*}; line=${cur#*|}
-    if [ -z "$cur" ] || [ "$seq" = "$last_seq" ]; then sleep 10; continue; fi
+    if [ -z "$cur" ] || [ "$seq" = "$last_seq" ] || [ "$seq" -lt $((started - 300)) ]; then sleep 10; continue; fi
   fi
   [ "$line" = STOP ] && { log "STOP"; exit 0; }
   read -r name cap script args <<< "$line"
