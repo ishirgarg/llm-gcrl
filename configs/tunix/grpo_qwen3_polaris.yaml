@@ -62,13 +62,16 @@ vllm_config:
     disable_log_stats: false
     enable_prefix_caching: true
 offload_to_cpu: false
-# Modern RLVR recipe (DAPO-style): no KL term (no reference-model pass), clip-higher 0.2 / 0.28, token-mean loss,
-# one optimizer step per rollout batch. BETA=... in the launcher turns KL back on.
+# Modern RLVR recipe: Dr. GRPO (arXiv 2503.20783) advantages and loss, i.e. reward minus the group mean (no division
+# by the group std) and per-sequence token sums divided by a constant (the max generation length) instead of each
+# response's own length; no KL term (no reference-model pass; BETA=... turns it back on); clip-higher 0.2 / 0.28;
+# one optimizer step per rollout batch.
 grpo_config:
   num_generations: 8
   num_iterations: 1
   beta: 0.0
   epsilon: 0.2
   epsilon_high: 0.28
-  loss_agg_mode: "token-mean"
+  advantage_estimator: "drgrpo"
+  loss_agg_mode: "sequence-mean-token-scale"
 reward_functions: []   # set by scripts/tunix/grpo_math.sh ($REPO/tools/math_reward.py)
