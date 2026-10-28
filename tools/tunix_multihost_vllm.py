@@ -303,9 +303,47 @@ def _patch_ppo_metrics():
   ppo_learner.np = _NumpyProxy()
 
 
+def _patch_shard_input():
+  """Shard trainer inputs from full per-process copies instead of concatenating them.
+
+  Every process holds the whole rollout batch (generate gathers it everywhere), but Tunix's
+  sharding_utils.shard_input builds the global array with make_array_from_process_local_data, which treats each
+  process's array as its *slice*: the global batch came out 8x duplicated on 8 hosts (same gradient, 8x the
+  compute and memory in every training micro-step and logprob pass). It also skipped sharding entirely when any
+  leaf was already global (e.g. GRPO with KL), so the bug showed only in some configurations. Build each global
+  array from the local copy instead (each process supplies its addressable shards); leave global leaves as they are.
+  """
+  from jax.interpreters import pxla  # pylint: disable=g-import-not-at-top
+  from tunix.sft import sharding_utils  # pylint: disable=g-import-not-at-top
+  from jax.sharding import PartitionSpec  # pylint: disable=g-import-not-at-top
+
+  def shard_input(input_data, data_sharding_axis):
+    mesh = pxla.thread_resources.env.physical_mesh
+    if mesh.empty:
+      return input_data
+    pspec = PartitionSpec(*data_sharding_axis)
+
+    def put(x):
+      if not isinstance(x, (np.ndarray, jax.Array)):
+        return x
+      if isinstance(x, jax.Array) and not x.is_fully_addressable:
+        return x  # already a global array
+      sharding = sharding_utils.get_sharding(x, mesh=mesh, pspec=pspec)
+      if isinstance(x, jax.Array) and x.sharding == sharding:
+        return x
+      host = np.asarray(x)
+      return jax.make_array_from_callback(host.shape, sharding, lambda idx: host[idx])
+
+    with jax.transfer_guard("allow"):
+      return jax.tree.map(put, input_data)
+
+  sharding_utils.shard_input = shard_input
+
+
 def install():
   if jax.process_count() == 1:
     return
+  _patch_shard_input()
   jax.devices = _jax_devices
   vllm_sampler.VllmSampler.__init__ = _init
   vllm_sampler.VllmSampler.mesh = property(_mesh)
