@@ -30,7 +30,8 @@ N_CHIPS = 16
 def derive(step_time_s, rollout_time_s, train_time_s, gen_tokens, prompt_tokens, samples,
            n_chips=N_CHIPS, n_params=None, peak_flops=V5E_PEAK_BF16_FLOPS):
   if n_params is None:  # launchers export MODEL (HF id)
-    n_params = MODEL_PARAMS[os.environ.get("MODEL", "Qwen/Qwen3-4B")]
+    model = os.environ.get("MODEL", "Qwen/Qwen3-4B")
+    n_params = MODEL_PARAMS[model[:-len("-Base")] if model.endswith("-Base") else model]
   def div(a, b):
     return a / b if a is not None and b else None
 

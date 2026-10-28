@@ -73,6 +73,10 @@ def evaluate(engine, step):
         with open(path, "a") as f:
           f.write(json.dumps({"step": step, "set": name, "n_problems": len(items), "samples": k, **m,
                               "time_s": round(dt, 1)}) + "\n")
+        with open(path.replace("eval.jsonl", "eval_samples.jsonl"), "a") as f:  # a few completions to inspect
+          for i in range(0, min(len(prompts), 4 * k), k):
+            f.write(json.dumps({"step": step, "set": name, "answer": items[i // k][1], "score": float(scores.flat[i]),
+                                "prompt": prompts[i][-300:], "completion": out.text[i][:3000]}) + "\n")
       print(f"[eval] step {step} {name} (n={len(items)}x{k}): " + ", ".join(f"{a}={b:.4f}" for a, b in m.items())
             + f" ({dt:.0f}s)", flush=True)
       try:
