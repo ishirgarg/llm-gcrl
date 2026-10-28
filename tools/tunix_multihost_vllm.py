@@ -47,6 +47,11 @@ def _vllm_devices():
   devs = _local_devices()
   if _owns_origin():
     devs = devs[: int(os.environ.get("ORIGIN_VLLM_CHIPS", "0"))]
+  # NO_VLLM_PROCESSES="5,6": these processes run no vLLM engine either (they only train), e.g. to route
+  # around a process whose engine fails.
+  skip = {int(p) for p in os.environ.get("NO_VLLM_PROCESSES", "").split(",") if p.strip()}
+  if jax.process_index() in skip:
+    devs = []
   return devs
 
 
