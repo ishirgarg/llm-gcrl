@@ -126,6 +126,30 @@ else:
 
     _grpo_learner.GRPOConfig.__init__ = _grpo_cfg_init
 
+  if os.environ.get("GRPO_ENTROPY_METRIC", "0") != "1":
+    # Tunix's GRPO loss always asks for per-token entropy, only to log it (aux["entropy"]; it is not in the loss).
+    # That is a second full-vocabulary fp32 pass over every token inside the differentiated step: about 2x the
+    # training-step memory and much of its time (PPO's loss skips it without an entropy bonus). Skip it; the
+    # logged entropy reads 0. GRPO_ENTROPY_METRIC=1 restores it.
+    import jax.numpy as _jnp_e  # pylint: disable=g-import-not-at-top
+    from tunix.rl import algo_core as _algo_core_e  # pylint: disable=g-import-not-at-top
+    from tunix.rl import common as _common_e  # pylint: disable=g-import-not-at-top
+
+    class _NoEntropyCommon:
+
+      def __getattr__(self, name):
+        return getattr(_common_e, name)
+
+      @staticmethod
+      def compute_per_token_logps(*args, **kwargs):
+        if kwargs.get("return_entropy") and not kwargs.get("stop_gradient", True):
+          kwargs["return_entropy"] = False
+          logps = _common_e.compute_per_token_logps(*args, **kwargs)
+          return logps, _jnp_e.zeros_like(logps)
+        return _common_e.compute_per_token_logps(*args, **kwargs)
+
+    _algo_core_e.common = _NoEntropyCommon()
+
 if int(os.environ.get("LOGPS_CHUNK") or 0) > 0:
   # Tunix chunks the actor's logits when compute_logps_chunk_size is set, but its reference-model pass (KL term)
   # ignores it and materialises the full [batch, length, vocab] logits, which is what runs out of HBM first at
