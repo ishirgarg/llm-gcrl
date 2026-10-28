@@ -3,6 +3,7 @@ user message = problem + " Write your answer in \\boxed{} format.", Qwen3 chat t
 
 Each element: {"prompts": templated prompt string, "question": problem, "answer": reference answer}.
 """
+import os
 import datasets
 import grain
 from transformers import AutoTokenizer
@@ -11,6 +12,7 @@ QUESTION_SUFFIX = " Write your answer in \\boxed{} format."
 
 
 def create_dataset(model_id: str = "Qwen/Qwen3-4B", seed: int = 0) -> grain.MapDataset:
+  seed = int(os.environ.get("DATA_SEED", seed))  # launch with DATA_SEED=N to change the data order
   tok = AutoTokenizer.from_pretrained(model_id)
   ds = datasets.load_dataset("POLARIS-Project/Polaris-Dataset-53K", split="train").shuffle(seed=seed)
   ds = ds.filter(lambda x: bool(x["problem"]) and bool(x["answer"]))

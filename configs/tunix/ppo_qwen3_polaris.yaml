@@ -28,8 +28,6 @@ tokenizer_config:
   tokenizer_type: "huggingface"
   add_bos: False
 data_module: "polaris_data"   # tools/polaris_data.py (tools/ is on sys.path via tools/tunix_run.py)
-data_config:              # kwargs for polaris_data.create_dataset (CLI: data_config.seed=N)
-  seed: 0
 apply_chat_template_to_dataset: false
 batch_size: 16
 num_test_batches: 0
