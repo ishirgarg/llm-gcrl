@@ -9,6 +9,8 @@
 #   MODEL=Qwen/Qwen3-4B      HF id (Qwen3 dense or MoE)
 #   MAX_TOKENS=1024 MAX_PROMPT=768 NUM_BATCHES=4 VLLM_HBM=0.4 MESH=1x4 VLLM_MAX_SEQS=128 VLLM_MAX_BATCHED=8192
 #   TRAIN_MICRO=1 LOGPS_MICRO=1 ROLLOUT_MICRO=16   (micro-batches, in prompts)   OFFLOAD=false FORCE_FULL=0
+#   LOGPS_CHUNK=0 REMAT=3 PREFIX_CACHE=true XLA_OPT=1 BETA= LR= CRITIC_LR= WARMUP=1 DATA=polaris|math
+#   EVAL_SETS=math500:4,... EVAL_EVERY=25 (tools/rl_eval.py)
 # Storage: HF weights -> worker-local $SCRATCH; checkpoints/tensorboard -> $CKPT_ROOT/tunix/$RUN_NAME[/w-N] (GCS);
 # metrics -> wandb + $LOG_ROOT/$RUN_NAME/eff[-w-N].jsonl (NFS).
 set -euo pipefail
@@ -41,6 +43,18 @@ OFFLOAD=$(pick OFFLOAD false)         # Tunix offload_to_cpu: park inactive mode
 FORCE_FULL=$(pick FORCE_FULL 0)       # 1: every rollout generates exactly MAX_TOKENS (worst case for max-context tests)
 VLLM_RESHARD_CHUNK=$(pick VLLM_RESHARD_CHUNK 16)  # weight sync in chunks of N tensors, deleting old vLLM buffers per chunk
 LOGPS_CHUNK=$(pick LOGPS_CHUNK 0)    # >0: compute logits/logprobs in sequence chunks of N tokens (rematerialized; saves HBM)
+export LOGPS_CHUNK                   # tools/tunix_run.py gives the reference (KL) pass the same chunking
+REMAT=$(pick REMAT 3)                # trainer activation remat: 3 = whole decoder layer, 2 = attention block, 1 = none
+PREFIX_CACHE=$(pick PREFIX_CACHE true)  # vLLM prefix caching: a prompt's 8 rollouts share its prefill
+XLA_OPT=$(pick XLA_OPT 1)            # 1: async collectives / collective-compute overlap XLA flags (v5e, as MaxText)
+BETA=$(pick BETA "")                 # KL coefficient override (configs default to 0: no KL, no reference pass)
+LR=$(pick LR "")                     # actor peak LR override; CRITIC_LR likewise (constant after WARMUP steps)
+CRITIC_LR=$(pick CRITIC_LR "")
+WARMUP=$(pick WARMUP 1)
+DATA=$(pick DATA polaris)            # polaris (POLARIS-53K) | math (MATH L3-5 train, tools/math_data.py)
+SAMPLING_KWARGS=$(pick SAMPLING_KWARGS "")   # extra vLLM SamplingParams, python dict body, e.g. 'stop_token_ids': [151645]
+CRITIC_MICRO=${CRITIC_MICRO:-$((TRAIN_MICRO * GROUP))}   # PPO value pass: sequences per slice
+export CRITIC_MICRO
 MODEL_NAME=$(echo "${MODEL#*/}" | tr 'A-Z' 'a-z')   # Qwen/Qwen3-4B -> qwen3-4b (Tunix model name)
 # Checkpoints only matter for real training: profiling runs of models above 4B skip them (bucket cost).
 case "$MODEL" in *-0.6B|*-1.7B|*-4B) SAVE_CKPT=${SAVE_CKPT:-1} ;; *) SAVE_CKPT=${SAVE_CKPT:-0} ;; esac
@@ -58,20 +72,46 @@ else
   # read back from a persistent cache, so compile them fresh every run.
   export VLLM_DISABLE_COMPILE_CACHE=1 JAX_ENABLE_COMPILATION_CACHE=false
 fi
-echo "worker=$WORKER algo=$ALGO host_mode=$HOST_MODE mode=$MODE model=$MODEL mesh=$MESH max_tokens=$MAX_TOKENS vllm_hbm=$VLLM_HBM logps_chunk=$LOGPS_CHUNK offload=$OFFLOAD"
+if [ "$XLA_OPT" = 1 ]; then
+  export LIBTPU_INIT_ARGS="${LIBTPU_INIT_ARGS:-} --xla_tpu_enable_async_collective_fusion=true \
+--xla_tpu_enable_async_collective_fusion_fuse_all_gather=true --xla_tpu_enable_async_collective_fusion_multiple_steps=true \
+--xla_tpu_overlap_compute_collective_tc=true --xla_enable_async_all_gather=true \
+--xla_tpu_enable_data_parallel_all_reduce_opt=true --xla_tpu_data_parallel_opt_different_sized_ops=true"
+fi
+echo "worker=$WORKER algo=$ALGO host_mode=$HOST_MODE mode=$MODE model=$MODEL mesh=$MESH max_tokens=$MAX_TOKENS vllm_hbm=$VLLM_HBM logps_chunk=$LOGPS_CHUNK offload=$OFFLOAD remat=$REMAT prefix_cache=$PREFIX_CACHE xla_opt=$XLA_OPT train_micro=$TRAIN_MICRO data=$DATA"
 # Fresh metrics for this launch (a crashed earlier attempt under the same run name must not leak in).
 if [ "$HOST_MODE" = single ]; then rm -f "$LOG_ROOT/$RUN_NAME/eff-$WORKER.jsonl"
 elif [ "$WORKER_ID" = 0 ]; then rm -f "$LOG_ROOT/$RUN_NAME/eff.jsonl"; fi
 
 LORA_ARGS=()
-FORCE_ARGS=()
-if [ "$FORCE_FULL" = 1 ]; then
-  FORCE_ARGS=("rollout_config.rollout_vllm_sampling_kwargs={'min_tokens': $MAX_TOKENS}")
-fi
+SAMPLING=$SAMPLING_KWARGS
+if [ "$FORCE_FULL" = 1 ]; then SAMPLING="${SAMPLING:+$SAMPLING, }'min_tokens': $MAX_TOKENS"; fi
+case "$MODEL" in  # base models end their chat turn with <|im_end|>, which is not their EOS token
+  *-Base) SAMPLING="${SAMPLING:+$SAMPLING, }'stop_token_ids': [151645, 151643]" ;;
+esac
+SAMPLING_ARGS=()
+if [ -n "$SAMPLING" ]; then SAMPLING_ARGS=("rollout_config.rollout_vllm_sampling_kwargs={$SAMPLING}"); fi
 if [ "$MODE" = lora ]; then
   export LORA_RANK=32 LORA_ALPHA=64.0   # tools/tunix_run.py merges LoRA into the weights synced to vLLM with alpha/rank
-  LORA_ARGS=("actor_model_config.lora_config={'rank': $LORA_RANK, 'alpha': $LORA_ALPHA, 'module_path': '.*q_proj|.*k_proj|.*v_proj|.*o_proj|.*gate_proj|.*up_proj|.*down_proj'}")
+  LORA_MODULES='.*q_proj|.*k_proj|.*v_proj|.*o_proj|.*gate_proj|.*up_proj|.*down_proj'
+  LORA_ARGS=("actor_model_config.lora_config={'rank': $LORA_RANK, 'alpha': $LORA_ALPHA, 'module_path': '$LORA_MODULES'}")
+  # PPO critic: same backbone + value head, its own LoRA adapter (full fine-tuning when MODE=full)
+  if [ "$ALGO" = ppo ]; then
+    LORA_ARGS+=("critic_model_config.lora_config={'rank': $LORA_RANK, 'alpha': $LORA_ALPHA, 'module_path': '$LORA_MODULES'}")
+  fi
 fi
+OPT_ARGS=()
+if [ -n "$LR" ]; then  # constant LR after a linear warmup (cosine from peak to peak)
+  OPT_ARGS+=(rl_training_config.actor_optimizer_config.peak_value="$LR" rl_training_config.actor_optimizer_config.end_value="$LR"
+             rl_training_config.actor_optimizer_config.warmup_steps="$WARMUP" rl_training_config.actor_optimizer_config.decay_steps="$NUM_BATCHES")
+fi
+if [ -n "$CRITIC_LR" ]; then
+  OPT_ARGS+=(rl_training_config.critic_optimizer_config.peak_value="$CRITIC_LR" rl_training_config.critic_optimizer_config.end_value="$CRITIC_LR"
+             rl_training_config.critic_optimizer_config.warmup_steps="$WARMUP" rl_training_config.critic_optimizer_config.decay_steps="$NUM_BATCHES")
+fi
+if [ -n "$BETA" ]; then OPT_ARGS+=("${ALGO}_config.beta=$BETA"); fi
+DATA_MODULE=polaris_data
+if [ "$DATA" = math ]; then DATA_MODULE=math_data; fi
 
 source "$NFS_ROOT/venvs/maxtext/bin/activate"
 TUNIX_SRC=$NFS_ROOT/third_party/tunix      # same commit as the installed package; only used for base_config.yaml
@@ -122,6 +162,10 @@ TUNIX_ALGO=$ALGO python3 "$REPO/tools/tunix_run.py" \
   rollout_config.rollout_vllm_delete_dst_buffers=true \
   rollout_config.rollout_vllm_reshard_chunk_size="$VLLM_RESHARD_CHUNK" \
   rl_training_config.compute_logps_chunk_size="$LOGPS_CHUNK" \
+  model_config.remat_config="$REMAT" \
+  vllm_config.kwargs.enable_prefix_caching="$PREFIX_CACHE" \
+  data_module="$DATA_MODULE" \
   "${LORA_ARGS[@]}" \
-  "${FORCE_ARGS[@]}" \
+  "${SAMPLING_ARGS[@]}" \
+  "${OPT_ARGS[@]}" \
   "$@"

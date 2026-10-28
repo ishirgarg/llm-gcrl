@@ -125,6 +125,11 @@ def _end_step(engine, log_to_engine=True):
   _acc.reset(time.perf_counter())
 
 
+def exclude(seconds):
+  """Leave `seconds` spent outside RL (e.g. an evaluation between steps) out of the current step's wall time."""
+  _acc.step_start += seconds
+
+
 def install():
   atexit.register(_flush_last_step)  # the last step has no following rollout to close it
   _wrap("generate", "rollout")

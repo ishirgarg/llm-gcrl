@@ -14,13 +14,9 @@ actor_model_config:
 reference_model_config:
   mesh: null
   same_mesh_as: "actor"
-critic_model_config:       # same backbone + scalar value head (TransformerWithScoreHead), own LoRA adapter
-  mesh: null
+critic_model_config:       # same backbone + scalar value head (TransformerWithScoreHead); the launcher gives it
+  mesh: null               # a LoRA adapter when MODE=lora (full fine-tuning otherwise)
   same_mesh_as: "actor"
-  lora_config:
-    rank: 32
-    alpha: 64.0
-    module_path: ".*q_proj|.*k_proj|.*v_proj|.*o_proj|.*gate_proj|.*up_proj|.*down_proj"
 rollout_model_config:      # colocated: vLLM shares the trainer's chips (vllm_config.hbm_utilization splits HBM)
   mesh: null
   same_mesh_as: "actor"
@@ -77,18 +73,17 @@ rollout_engine: "vllm"
 vllm_config:
   hbm_utilization: 0.4
   async_scheduling: true
-  kwargs:   # Tunix CLI default + prefix caching OFF: with 8 identical prompts per group, cache hits make
-            # tiny (2-token) prefills that crashed tpu-inference on v5e-32 at step 1 (process 5, every run)
+  kwargs:   # Tunix CLI default; prefix caching is set by the launcher (PREFIX_CACHE, default on)
     kv_cache_metrics: true
     disable_log_stats: false
-    enable_prefix_caching: false
+    enable_prefix_caching: true
 offload_to_cpu: false
 # Modern PPO-clip, no KL: one optimizer step per rollout batch (mini_batch = batch), clip-higher 0.2 / 0.28.
 # Rollouts per prompt come from PPO_GROUP (tools/tunix_run.py patches Tunix's PPO, which hard-codes 1).
 ppo_config:
   num_iterations: 1
   gamma: 1.0
-  gae_lambda: 0.95
+  gae_lambda: 1.0          # Open-Reasoner-Zero: gamma = lambda = 1 (Monte-Carlo returns minus the value baseline)
   beta: 0.0
   epsilon: 0.2
   epsilon_low: 0.2

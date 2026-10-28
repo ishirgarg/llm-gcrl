@@ -74,8 +74,77 @@ if os.environ.get("TUNIX_ALGO", "grpo") == "ppo":
           micro_batch_size=micro_batch_size)
 
     _rl_cluster.RLEngine.get_old_per_token_logps = _old_logps_from_actor
+
+  if os.environ.get("ONPOLICY_OLD_LOGPS", "1") == "1":
+    # With one policy update per rollout batch (num_iterations 1, mini_batch = batch) every micro-step's loss
+    # runs on the pre-update weights, so the old-policy logps equal the current ones exactly. Skip that extra
+    # actor forward pass over the whole batch and use stop_gradient(current logps) in the loss instead (what
+    # Tunix's GRPO already does when it has no old logps). Only without KL (the KL term needs them).
+    import dataclasses as _dc  # pylint: disable=g-import-not-at-top
+    from tunix.rl import algo_core as _algo_core  # pylint: disable=g-import-not-at-top
+    from tunix.rl import function_registry as _fn_registry  # pylint: disable=g-import-not-at-top
+
+    _orig_gen_adv_op = ppo_learner.PPOLearner._generate_and_compute_advantage  # pylint: disable=protected-access
+
+    def _gen_adv_onpolicy(self, *args, **kwargs):
+      if self.algo_config.num_iterations != 1 or self.algo_config.beta != 0.0:
+        return _orig_gen_adv_op(self, *args, **kwargs)
+      self.rl_engine.get_old_per_token_logps = lambda *a, **k: None  # instance attr shadows the class method
+      try:
+        return _orig_gen_adv_op(self, *args, **kwargs)
+      finally:
+        del self.rl_engine.get_old_per_token_logps
+
+    ppo_learner.PPOLearner._generate_and_compute_advantage = _gen_adv_onpolicy  # pylint: disable=protected-access
+
+    class _OnPolicyLogps:
+      """Stands in for missing old logps: `logps - old` evaluates to logps - stop_gradient(logps) (ratio 1)."""
+
+      def __rsub__(self, logps):
+        return logps - jax.lax.stop_gradient(logps)
+
+    _orig_ppo_loss = _algo_core.ppo_policy_loss_fn
+
+    def _ppo_loss_onpolicy(model, train_example, algo_config, pad_id, eos_id, **kwargs):
+      if train_example.old_per_token_logps is None:
+        train_example = _dc.replace(train_example, old_per_token_logps=_OnPolicyLogps())
+      return _orig_ppo_loss(model, train_example, algo_config, pad_id, eos_id, **kwargs)
+
+    _fn_registry.register_policy_loss_fn("ppo")(_ppo_loss_onpolicy)
 else:
   from tunix.cli import grpo_main as entry  # pylint: disable=g-import-not-at-top
+  import dataclasses as _dc  # pylint: disable=g-import-not-at-top
+  from tunix.rl.grpo import grpo_learner as _grpo_learner  # pylint: disable=g-import-not-at-top
+  if "epsilon_high" not in {f.name for f in _dc.fields(_grpo_learner.GRPOConfig)}:
+    # The installed GRPOConfig has no epsilon_high field, but its loss reads one when present (clip-higher):
+    # accept grpo_config.epsilon_high and set it as an attribute.
+    _orig_grpo_cfg_init = _grpo_learner.GRPOConfig.__init__
+
+    def _grpo_cfg_init(self, *args, epsilon_high=None, **kwargs):
+      _orig_grpo_cfg_init(self, *args, **kwargs)
+      object.__setattr__(self, "epsilon_high", self.epsilon if epsilon_high is None else float(epsilon_high))
+
+    _grpo_learner.GRPOConfig.__init__ = _grpo_cfg_init
+
+if int(os.environ.get("LOGPS_CHUNK") or 0) > 0:
+  # Tunix chunks the actor's logits when compute_logps_chunk_size is set, but its reference-model pass (KL term)
+  # ignores it and materialises the full [batch, length, vocab] logits, which is what runs out of HBM first at
+  # long context with KL on. Give the reference pass the same chunk size.
+  from tunix.rl import common as _common  # pylint: disable=g-import-not-at-top
+  from tunix.rl.inference import inference_worker as _inference_worker  # pylint: disable=g-import-not-at-top
+  _ref_chunk = int(os.environ["LOGPS_CHUNK"])
+
+  class _ChunkedCommon:
+
+    def __getattr__(self, name):
+      return getattr(_common, name)
+
+    @staticmethod
+    def compute_per_token_logps(*args, **kwargs):
+      kwargs.setdefault("chunk_size", _ref_chunk)
+      return _common.compute_per_token_logps(*args, **kwargs)
+
+  _inference_worker.common = _ChunkedCommon()
 
 def _patch_lora_merged_sync():
   """Sync LoRA training to vLLM as merged full weights.
@@ -144,7 +213,12 @@ def _patch_lora_merged_sync():
 
 
 _patch_lora_merged_sync()  # before tunix_eff wraps sync_weights, so its timing includes the merge
+if os.environ.get("EVAL_SETS"):
+  import rl_eval  # pylint: disable=g-import-not-at-top
+  rl_eval.install()  # before tunix_eff, so evaluation generations are not counted as rollouts
 tunix_eff.install()
+if os.environ.get("EVAL_SETS"):
+  rl_eval.install_hooks()  # after tunix_eff, so evaluation time is not counted as weight-sync time
 
 
 def _hf_from_cache(model_id, model_download_path):  # pylint: disable=unused-argument
