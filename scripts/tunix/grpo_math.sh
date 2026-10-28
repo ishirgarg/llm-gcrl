@@ -8,8 +8,8 @@
 #   MODE=lora|full           LoRA (r=32) or full fine-tuning (default lora)
 #   MODEL=Qwen/Qwen3-4B      HF id (Qwen3 dense or MoE)
 #   MAX_TOKENS=1024 MAX_PROMPT=768 NUM_BATCHES=4 VLLM_HBM=0.4 MESH=1x4 VLLM_MAX_SEQS=128 VLLM_MAX_BATCHED=8192
-#   TRAIN_MICRO=1 LOGPS_MICRO=1 ROLLOUT_MICRO=16   (micro-batches, in prompts)   OFFLOAD=false FORCE_FULL=0
-#   LOGPS_CHUNK=0 REMAT=3 PREFIX_CACHE=true XLA_OPT=1 BETA= LR= CRITIC_LR= WARMUP=1 DATA=polaris|math
+#   TRAIN_MICRO=auto LOGPS_MICRO=1 ROLLOUT_MICRO=16   (micro-batches, in prompts)   OFFLOAD=false FORCE_FULL=0
+#   LOGPS_CHUNK=auto REMAT=3 PREFIX_CACHE=true XLA_OPT=1 BETA= LR= CRITIC_LR= WARMUP=1 DATA=polaris|math
 #   EVAL_SETS=math500:4,... EVAL_EVERY=25 (tools/rl_eval.py)
 # Storage: HF weights -> worker-local $SCRATCH; checkpoints/tensorboard -> $CKPT_ROOT/tunix/$RUN_NAME[/w-N] (GCS);
 # metrics -> wandb + $LOG_ROOT/$RUN_NAME/eff[-w-N].jsonl (NFS).
@@ -36,13 +36,24 @@ BATCH=$(pick BATCH 16)                 # prompts per RL step
 GROUP=$(pick GROUP 8)                  # rollouts per prompt (GRPO group size)
 VLLM_MAX_SEQS=$(pick VLLM_MAX_SEQS $((BATCH * GROUP)))   # concurrent sequences (= rollouts per step)
 VLLM_MAX_BATCHED=$(pick VLLM_MAX_BATCHED 8192)   # tokens per vLLM forward (bounds prefill temporaries)
-TRAIN_MICRO=$(pick TRAIN_MICRO 1)    # prompts (x num_generations sequences) per gradient micro-step
+# prompts (x GROUP sequences) per gradient micro-step. Default: as many as fit a token budget per micro-step
+# (64k tokens PPO, 32k GRPO, whose update needs ~3x more memory per sequence in Tunix), a divisor of BATCH. Bigger
+# micro-steps amortise the per-micro-step FSDP weight all-gathers: PPO at 1k, 1 -> 4 prompts: training 3.3x faster.
+SEQ_LEN=$(( $(pick MAX_PROMPT 768) + $(pick MAX_TOKENS 1024) ))
+case "$(pick ALGO grpo)" in ppo) MICRO_BUDGET=65536 ;; *) MICRO_BUDGET=32768 ;; esac
+auto_micro=1
+for m in $(seq "$(pick BATCH 16)" -1 1); do
+  if [ $(( $(pick BATCH 16) % m )) -eq 0 ] && [ $(( m * $(pick GROUP 8) * SEQ_LEN )) -le "$MICRO_BUDGET" ]; then auto_micro=$m; break; fi
+done
+TRAIN_MICRO=$(pick TRAIN_MICRO $auto_micro)
 LOGPS_MICRO=$(pick LOGPS_MICRO 1)    # prompts per reference/old-logprob micro-pass
 ROLLOUT_MICRO=$(pick ROLLOUT_MICRO $BATCH)  # prompts handed to vLLM at once (16 -> all 128 rollouts concurrently)
 OFFLOAD=$(pick OFFLOAD false)         # Tunix offload_to_cpu: park inactive models in host RAM between phases
 FORCE_FULL=$(pick FORCE_FULL 0)       # 1: every rollout generates exactly MAX_TOKENS (worst case for max-context tests)
 VLLM_RESHARD_CHUNK=$(pick VLLM_RESHARD_CHUNK 16)  # weight sync in chunks of N tensors, deleting old vLLM buffers per chunk
-LOGPS_CHUNK=$(pick LOGPS_CHUNK 0)    # >0: compute logits/logprobs in sequence chunks of N tokens (rematerialized; saves HBM)
+# >0: compute logits/logprobs in sequence chunks of N tokens (rematerialized; saves HBM, costs some training time).
+# Default 1024 from 4k-token completions (the [tokens, 152k-vocab] fp32 logits are what runs out of HBM first).
+LOGPS_CHUNK=$(pick LOGPS_CHUNK $([ "$(pick MAX_TOKENS 1024)" -ge 4096 ] && echo 1024 || echo 0))
 export LOGPS_CHUNK                   # tools/tunix_run.py gives the reference (KL) pass the same chunking
 REMAT=$(pick REMAT 3)                # trainer activation remat: 3 = whole decoder layer, 2 = attention block, 1 = none
 PREFIX_CACHE=$(pick PREFIX_CACHE true)  # vLLM prefix caching: a prompt's 8 rollouts share its prefill
