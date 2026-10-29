@@ -1,6 +1,6 @@
 """Evaluation inside a Tunix RL run, sampled through the run's own vLLM rollout engine (= current policy weights).
 
-  EVAL_SETS="math500:4,amc23:8,aime24:8"   sets (tools/math_data.py) and samples per problem
+  EVAL_SETS="math500:4:3072,amc23:8:8192"  sets (tools/math_data.py), samples per problem, optional completion cap
   EVAL_EVERY=25                            before training, every N policy updates, and after the last one
   EVAL_TEMPERATURE / EVAL_TOP_P            sampling for evaluation (default: the training rollout's)
 
@@ -30,8 +30,8 @@ def _load_sets():
   if _sets is None:
     _sets = []
     for spec in os.environ["EVAL_SETS"].split(","):
-      name, k = (spec.split(":") + ["1"])[:2]
-      _sets.append((name, int(k), math_data.eval_set(name)))
+      name, k, cap = (spec.split(":") + ["1", "0"])[:3]
+      _sets.append((name, int(k), int(cap), math_data.eval_set(name)))
   return _sets
 
 
@@ -53,10 +53,11 @@ def evaluate(engine, step):
   orig_cfg, eval_cfg = _eval_rollout_config(engine)
   object.__setattr__(engine.cluster_config, "rollout_config", eval_cfg)
   try:
-    for name, k, items in _load_sets():
+    for name, k, cap, items in _load_sets():
       t0 = time.perf_counter()
       prompts = [p for p, _ in items for _ in range(k)]
-      out = _raw_generate(engine, prompts, micro_batch_size=len(prompts))
+      cap = cap or eval_cfg.max_tokens_to_generate  # per-set completion cap (needs VLLM_MAX_LEN >= prompt + cap)
+      out = _raw_generate(engine, prompts, micro_batch_size=len(prompts), max_generation_steps=cap)
       scores = np.array([math_reward._score(c, a) for c, (_, a) in  # pylint: disable=protected-access
                          zip(out.text, [it for it in items for _ in range(k)])]).reshape(len(items), k)
       correct = scores == 1.0
@@ -65,7 +66,7 @@ def evaluate(engine, step):
           f"pass@{k}": float(correct.any(axis=1).mean()),
           "boxed_rate": float((scores != -math_reward.FORMAT_COEF).mean()),
           "mean_len": float(np.mean([len(t) for t in out.tokens])),
-          "max_len_frac": float(np.mean([len(t) >= eval_cfg.max_tokens_to_generate for t in out.tokens])),
+          "max_len_frac": float(np.mean([len(t) >= cap for t in out.tokens])),
       }
       dt = time.perf_counter() - t0
       if jax.process_index() == 0:

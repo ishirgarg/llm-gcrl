@@ -10,7 +10,7 @@
 #   MAX_TOKENS=1024 MAX_PROMPT=768 NUM_BATCHES=4 VLLM_HBM=0.4 MESH=1x4 VLLM_MAX_SEQS=128 VLLM_MAX_BATCHED=8192
 #   TRAIN_MICRO=auto LOGPS_MICRO=1 ROLLOUT_MICRO=16   (micro-batches, in prompts)   OFFLOAD=false FORCE_FULL=0
 #   LOGPS_CHUNK=auto REMAT=3 PREFIX_CACHE=true XLA_OPT=1 BETA= LR= CRITIC_LR= WARMUP=1 DATA=polaris|math
-#   EVAL_SETS=math500:4,... EVAL_EVERY=25 (tools/rl_eval.py)
+#   EVAL_SETS=math500:4:3072,... EVAL_EVERY=25 (tools/rl_eval.py) VLLM_MAX_LEN=0 TIS=0 TIS_CAP=2.0
 # Storage: HF weights -> worker-local $SCRATCH; checkpoints/tensorboard -> $CKPT_ROOT/tunix/$RUN_NAME[/w-N] (GCS);
 # metrics -> wandb + $LOG_ROOT/$RUN_NAME/eff[-w-N].jsonl (NFS).
 set -euo pipefail
@@ -66,6 +66,12 @@ DATA=$(pick DATA polaris)            # polaris (POLARIS-53K) | math (MATH L3-5 t
 SAMPLING_KWARGS=$(pick SAMPLING_KWARGS "")   # extra vLLM SamplingParams, python dict body, e.g. 'stop_token_ids': [151645]
 CRITIC_MICRO=${CRITIC_MICRO:-$((TRAIN_MICRO * GROUP))}   # PPO value pass: sequences per slice
 export CRITIC_MICRO
+# 1: correct the vLLM-vs-trainer log-prob mismatch with truncated importance sampling, w = min(pi_trainer/pi_vllm,
+# TIS_CAP) per token (tools/tunix_run.py). Costs one trainer log-prob pass per step.
+TIS=$(pick TIS 0); TIS_CAP=$(pick TIS_CAP 2.0)
+export TIS TIS_CAP
+VLLM_MAX_LEN=$(pick VLLM_MAX_LEN 0)  # >0: vLLM max_model_len (for evaluation longer than training rollouts)
+export VLLM_MAX_LEN
 MODEL_NAME=$(echo "${MODEL#*/}" | tr 'A-Z' 'a-z')   # Qwen/Qwen3-4B -> qwen3-4b (Tunix model name)
 # Checkpoints only matter for real training: profiling runs of models above 4B skip them (bucket cost).
 case "$MODEL" in *-0.6B|*-1.7B|*-4B) SAVE_CKPT=${SAVE_CKPT:-1} ;; *) SAVE_CKPT=${SAVE_CKPT:-0} ;; esac
@@ -121,6 +127,14 @@ if [ -n "$CRITIC_LR" ]; then
              rl_training_config.critic_optimizer_config.warmup_steps="$WARMUP" rl_training_config.critic_optimizer_config.decay_steps="$NUM_BATCHES")
 fi
 if [ -n "$BETA" ]; then OPT_ARGS+=("${ALGO}_config.beta=$BETA"); fi
+if [ "$TIS" = 1 ]; then
+  OPT_ARGS+=(rollout_config.return_logprobs=true)
+  if [ "$ALGO" = ppo ]; then
+    export ONPOLICY_OLD_LOGPS=0   # the trainer log-prob pass is needed for the weights
+  else
+    OPT_ARGS+=(grpo_config.use_rollout_logps=true grpo_config.sampler_is=token grpo_config.sampler_is_threshold="$TIS_CAP")
+  fi
+fi
 DATA_MODULE=polaris_data
 if [ "$DATA" = math ]; then DATA_MODULE=math_data; fi
 

@@ -150,6 +150,91 @@ else:
 
     _algo_core_e.common = _NoEntropyCommon()
 
+if int(os.environ.get("VLLM_MAX_LEN") or 0) > 0:
+  # Tunix sizes vLLM's max_model_len as prompt cap + completion cap + 256. Raise it so in-run evaluation can
+  # generate longer than training rollouts (rl_eval per-set caps); the KV pool size does not change.
+  import dataclasses as _dc_len  # pylint: disable=g-import-not-at-top
+  from tunix.cli import base_rl_pipeline as _brp  # pylint: disable=g-import-not-at-top
+  _orig_create_rollout_config = _brp.BasePipeline.create_rollout_config
+
+  def _create_rollout_config(self, *args, **kwargs):
+    cfg = _orig_create_rollout_config(self, *args, **kwargs)
+    want = int(os.environ["VLLM_MAX_LEN"])
+    if getattr(cfg, "kv_cache_size", 0) < want:
+      cfg = _dc_len.replace(cfg, kv_cache_size=want)
+    return cfg
+
+  _brp.BasePipeline.create_rollout_config = _create_rollout_config
+
+if os.environ.get("TIS") == "1":
+  # Rollout-vs-trainer mismatch: vLLM samples with its own kernels / bf16 merged weights, so pi_vllm != pi_trainer
+  # on the same tokens. Truncated importance sampling re-weights each token's policy-gradient term by
+  # w = min(pi_trainer / pi_vllm, TIS_CAP) (detached). GRPO uses Tunix's built-in version (grpo_config.sampler_is
+  # "token", set by the launcher); for PPO the per-token GAE advantages are scaled by w, which equals scaling the
+  # clipped per-token loss for w >= 0. Mismatch statistics go to $LOG_ROOT/$RUN_NAME/mismatch.jsonl (process 0).
+  import json as _json  # pylint: disable=g-import-not-at-top
+  import numpy as _np  # pylint: disable=g-import-not-at-top
+  from jax.experimental import multihost_utils as _mhu  # pylint: disable=g-import-not-at-top
+  from tunix.rl import rl_cluster as _rc_tis  # pylint: disable=g-import-not-at-top
+  _tis_cap = float(os.environ.get("TIS_CAP", "2.0"))
+
+  def _mismatch_log(rec):
+    if jax.process_index() == 0 and os.environ.get("LOG_ROOT") and os.environ.get("RUN_NAME"):
+      with open(os.path.join(os.environ["LOG_ROOT"], os.environ["RUN_NAME"], "mismatch.jsonl"), "a") as f:
+        f.write(_json.dumps(rec) + "\n")
+
+  _orig_buffer_metrics = _rc_tis.RLEngine.buffer_metrics
+
+  def _buffer_metrics(self, metrics, *args, **kwargs):  # GRPO: copy Tunix's sampler/trainer metrics to the jsonl
+    sel = {k: float(v[0]) for k, v in metrics.items() if k.startswith(("sampler_trainer/", "sampler_is/"))}
+    if sel:
+      _mismatch_log(sel)
+    return _orig_buffer_metrics(self, metrics, *args, **kwargs)
+
+  _rc_tis.RLEngine.buffer_metrics = _buffer_metrics
+
+  if os.environ.get("TUNIX_ALGO", "grpo") == "ppo":
+    _orig_generate_tis = _rc_tis.RLEngine.generate
+
+    def _generate_keep_logprobs(self, *args, **kwargs):
+      out = _orig_generate_tis(self, *args, **kwargs)
+      self._tis_rollout_logprobs = out.logprobs  # pylint: disable=protected-access
+      return out
+
+    _rc_tis.RLEngine.generate = _generate_keep_logprobs
+
+    def _host(x):
+      if isinstance(x, jax.Array) and not x.is_fully_addressable:
+        return _np.asarray(_mhu.process_allgather(x, tiled=True))
+      return _np.asarray(x)
+
+    _orig_gen_adv_tis = ppo_learner.PPOLearner._generate_and_compute_advantage  # pylint: disable=protected-access
+
+    def _gen_adv_tis(self, *args, **kwargs):
+      ex = _orig_gen_adv_tis(self, *args, **kwargs)
+      roll_lp = getattr(self.rl_engine, "_tis_rollout_logprobs", None)
+      if roll_lp is None or ex.old_per_token_logps is None:
+        return ex
+      old = _host(ex.old_per_token_logps).astype(_np.float32)  # trainer logps (pre-update = current policy)
+      mask = _host(ex.completion_mask).astype(_np.float32)
+      roll = _np.zeros_like(old)
+      for i, x in enumerate(roll_lp):
+        n = min(len(x), old.shape[1])
+        roll[i, :n] = _np.asarray(x[:n], _np.float32)
+      log_ratio = _np.clip(old - roll, -20.0, 20.0)
+      ratio = _np.exp(log_ratio)
+      w = _np.minimum(ratio, _tis_cap) * mask
+      adv = _host(ex.advantages).astype(_np.float32)
+      denom = max(float(mask.sum()), 1.0)
+      _mismatch_log({"sampler_trainer/logp_diff_mean": float((_np.abs(log_ratio) * mask).sum() / denom),
+                     "sampler_trainer/logp_diff_max": float((_np.abs(log_ratio) * mask).max()),
+                     "sampler_is/weight_mean": float(w.sum() / denom),
+                     "sampler_is/frac_clipped": float(((ratio > _tis_cap) * mask).sum() / denom)})
+      return _dc_tis.replace(ex, advantages=jax.numpy.asarray(adv * w if adv.ndim == 2 else adv[:, None] * w))
+
+    import dataclasses as _dc_tis  # pylint: disable=g-import-not-at-top
+    ppo_learner.PPOLearner._generate_and_compute_advantage = _gen_adv_tis  # pylint: disable=protected-access
+
 if int(os.environ.get("LOGPS_CHUNK") or 0) > 0:
   # Tunix chunks the actor's logits when compute_logps_chunk_size is set, but its reference-model pass (KL term)
   # ignores it and materialises the full [batch, length, vocab] logits, which is what runs out of HBM first at
