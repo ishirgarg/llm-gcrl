@@ -150,6 +150,33 @@ else:
 
     _algo_core_e.common = _NoEntropyCommon()
 
+if os.environ.get("LEN_SCHEDULE"):
+  # Profiling several completion caps in one job (the model loads once): LEN_SCHEDULE="4096:2,8192:2" runs 2 RL
+  # steps at a 4096-token cap, then 2 at 8192, ... The launcher sets MAX_TOKENS to the largest cap (vLLM
+  # max_model_len) and NUM_BATCHES to the total. Learners read the rollout config every step, so changing its
+  # max_tokens_to_generate changes both the generation cap and the training padding (one recompile per cap).
+  # Each step's cap goes to $LOG_ROOT/$RUN_NAME/lengths.jsonl (process 0), aligned with eff.jsonl steps.
+  import json as _json_len  # pylint: disable=g-import-not-at-top
+  from tunix.rl import rl_cluster as _rc_len  # pylint: disable=g-import-not-at-top
+  _len_steps = []
+  for _spec in os.environ["LEN_SCHEDULE"].split(","):
+    _cap, _n = _spec.split(":")
+    _len_steps += [int(_cap)] * int(_n)
+  _orig_generate_len = _rc_len.RLEngine.generate
+
+  def _generate_scheduled(self, *args, **kwargs):
+    i = getattr(self, "_len_step", 0)
+    cap = _len_steps[min(i, len(_len_steps) - 1)]
+    self.get_rollout_config(_rc_len.Mode.TRAIN).max_tokens_to_generate = cap
+    self._len_step = i + 1  # pylint: disable=protected-access
+    if jax.process_index() == 0 and os.environ.get("LOG_ROOT") and os.environ.get("RUN_NAME"):
+      with open(os.path.join(os.environ["LOG_ROOT"], os.environ["RUN_NAME"], "lengths.jsonl"), "a") as f:
+        f.write(_json_len.dumps({"step": i, "max_tokens": cap}) + "\n")
+    print(f"[tunix_run] step {i}: completion cap {cap}", flush=True)
+    return _orig_generate_len(self, *args, **kwargs)
+
+  _rc_len.RLEngine.generate = _generate_scheduled
+
 if int(os.environ.get("VLLM_MAX_LEN") or 0) > 0:
   # Tunix sizes vLLM's max_model_len as prompt cap + completion cap + 256. Raise it so in-run evaluation can
   # generate longer than training rollouts (rl_eval per-set caps); the KV pool size does not change.

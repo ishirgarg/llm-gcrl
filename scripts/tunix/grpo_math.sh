@@ -27,8 +27,21 @@ ALGO=$(pick ALGO grpo)               # grpo | ppo (actor + LoRA critic, configs/
 MODEL=$(pick MODEL Qwen/Qwen3-4B)
 export MODEL   # effmetrics reads it for the MFU parameter count
 MAX_TOKENS=$(pick MAX_TOKENS 1024)
+# LEN_SCHEDULE="4096:2,8192:2,...": profile several completion caps in one job (tools/tunix_run.py); sets
+# MAX_TOKENS to the largest cap and NUM_BATCHES to the total number of steps.
+LEN_SCHEDULE=$(pick LEN_SCHEDULE "")
+export LEN_SCHEDULE
+if [ -n "$LEN_SCHEDULE" ]; then
+  MAX_TOKENS=0; NUM_BATCHES=0
+  for spec in ${LEN_SCHEDULE//,/ }; do
+    cap=${spec%%:*}; n=${spec##*:}
+    [ "$cap" -gt "$MAX_TOKENS" ] && MAX_TOKENS=$cap
+    NUM_BATCHES=$((NUM_BATCHES + n))
+  done
+  export MAX_TOKENS NUM_BATCHES
+fi
 MAX_PROMPT=$(pick MAX_PROMPT 768)
-NUM_BATCHES=$(pick NUM_BATCHES 4)
+NUM_BATCHES=$(pick NUM_BATCHES 4)   # (LEN_SCHEDULE overrides it above via the exported value)
 VLLM_HBM=$(pick VLLM_HBM 0.4)
 MESH=$(pick MESH 1x4)                  # fsdp x tp, written AxB so it survives ssh/tmux quoting
 MESH_TUPLE="(${MESH/x/,})"
