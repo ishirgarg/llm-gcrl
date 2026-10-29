@@ -110,12 +110,53 @@ def _vllm_config(self, config):
 
 
 # ---------------------------------------------------------------------------------------------- 2. weight sync
+@functools.lru_cache(maxsize=None)
+def _host_local_spec(mesh, shape):
+  """PartitionSpec splitting one dim across a mesh axis that lies within each host (replicated across hosts)."""
+  for axis in mesh.axis_names:
+    devs = np.asarray(mesh.devices)
+    # an axis is host-local if moving along it never changes the process
+    moved = np.moveaxis(devs, mesh.axis_names.index(axis), 0)
+    if not all(len({d.process_index for d in moved[(slice(None),) + idx]}) == 1
+               for idx in np.ndindex(moved.shape[1:])):
+      continue
+    size = mesh.shape[axis]
+    for dim, n in enumerate(shape):
+      if n % size == 0:
+        return P(*([None] * dim + [axis]))
+  return None
+
+
 def _to_host(x):
-  if isinstance(x, jax.Array):
-    if x.is_fully_addressable:
-      return np.asarray(x)
-    return np.asarray(multihost_utils.process_allgather(x, tiled=True))  # collective, same leaf on all processes
-  return x
+  """Full host copy of a (possibly global) array on every process. Collective: same leaf order on all processes.
+
+  multihost_utils.process_allgather replicates the whole tensor on every chip first (2.9 GiB for Qwen3-14B's
+  embedding: OOM next to vLLM). Instead reshard so each host's chips hold one quarter each (replicated across
+  hosts) and assemble the host copy from the local shards.
+  """
+  if not isinstance(x, jax.Array):
+    return x
+  if x.is_fully_addressable:
+    return np.asarray(x)
+  mesh = getattr(x.sharding, "mesh", None)
+  spec = _host_local_spec(mesh, x.shape) if isinstance(x.sharding, NamedSharding) else None
+  if spec is not None:
+    y = jax.jit(lambda a: a, out_shardings=NamedSharding(mesh, spec))(x)
+    host = np.empty(x.shape, dtype=x.dtype)
+    covered = 0
+    seen = set()
+    for shard in y.addressable_shards:
+      key = tuple((s.start, s.stop) for s in shard.index)
+      if key in seen:
+        continue
+      seen.add(key)
+      data = np.asarray(shard.data)
+      host[shard.index] = data
+      covered += data.size
+    del y
+    if covered == host.size:
+      return host
+  return np.asarray(multihost_utils.process_allgather(x, tiled=True))
 
 
 _orig_update_params = vllm_sampler.VllmSampler.update_params
