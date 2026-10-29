@@ -23,6 +23,17 @@ def main(d):
       steps.append({k: r.get(f"eff/{k}") for k in KEYS} | {"step": r["step"]})
   for s in steps:
     print("  step", s["step"], {k: round(v, 1) for k, v in s.items() if k != "step" and v is not None})
+  if os.path.exists(f"{d}/lengths.jsonl"):  # LEN_SCHEDULE run: last step at each completion cap (first one compiles)
+    cap_of = {r["step"]: r["max_tokens"] for r in map(json.loads, open(f"{d}/lengths.jsonl"))}
+    by_cap = {}
+    for s in steps:
+      by_cap.setdefault(cap_of.get(s["step"]), []).append(s)
+    for cap, ss in by_cap.items():
+      last = ss[-1]
+      print(f"  CAP {cap}: steps {len(ss)}, last:", {k: round(v, 1) for k, v in last.items() if k != "step" and v is not None})
+    reached = [c for c in cap_of.values()]
+    if reached:
+      print(f"  CAPS reached: up to {max(reached)} (completed steps per cap above)")
   later = steps[1:] if len(steps) > 1 else steps
   if later:
     med = {k: round(statistics.median([s[k] for s in later if s[k] is not None]), 1)
