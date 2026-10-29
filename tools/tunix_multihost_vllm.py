@@ -340,10 +340,36 @@ def _patch_shard_input():
   sharding_utils.shard_input = shard_input
 
 
+def _patch_weight_loading():
+  """Load safetensors weights shard by shard on multi-host meshes.
+
+  Tunix's optimized loader calls jax.device_put(full host tensor, global sharding) per weight. Across processes
+  that runs as a compiled program whose temporaries grow with the model (19.7 GiB for Qwen3-8B, 24.6 GiB for 14B:
+  OOM before training starts). Every host already holds the full tensor (memory-mapped), so build each global
+  array with make_array_from_callback: each process copies only its addressable shards from the host array.
+  """
+  from tunix.models import safetensors_loader  # pylint: disable=g-import-not-at-top
+
+  class _JaxProxy:
+
+    def __getattr__(self, name):
+      return getattr(jax, name)
+
+    @staticmethod
+    def device_put(x, device=None, *args, **kwargs):
+      if (isinstance(x, np.ndarray) and hasattr(device, "is_fully_addressable")
+          and not device.is_fully_addressable and not args and not kwargs):
+        return jax.make_array_from_callback(x.shape, device, lambda idx: np.asarray(x[idx]))
+      return jax.device_put(x, device, *args, **kwargs)
+
+  safetensors_loader.jax = _JaxProxy()
+
+
 def install():
   if jax.process_count() == 1:
     return
   _patch_shard_input()
+  _patch_weight_loading()
   jax.devices = _jax_devices
   vllm_sampler.VllmSampler.__init__ = _init
   vllm_sampler.VllmSampler.mesh = property(_mesh)
