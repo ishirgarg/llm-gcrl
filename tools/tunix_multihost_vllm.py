@@ -127,6 +127,11 @@ def _host_local_spec(mesh, shape):
   return None
 
 
+@functools.lru_cache(maxsize=None)
+def _reshard_fn(sharding):
+  return jax.jit(lambda a: a, out_shardings=sharding)  # one jit per target sharding; it caches per input shape
+
+
 def _to_host(x):
   """Full host copy of a (possibly global) array on every process. Collective: same leaf order on all processes.
 
@@ -141,7 +146,7 @@ def _to_host(x):
   mesh = getattr(x.sharding, "mesh", None)
   spec = _host_local_spec(mesh, x.shape) if isinstance(x.sharding, NamedSharding) else None
   if spec is not None:
-    y = jax.jit(lambda a: a, out_shardings=NamedSharding(mesh, spec))(x)
+    y = _reshard_fn(NamedSharding(mesh, spec))(x)
     host = np.empty(x.shape, dtype=x.dtype)
     covered = 0
     seen = set()
