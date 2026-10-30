@@ -1,0 +1,593 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<!-- RL memory planner for Tunix + vLLM on a TPU v5e-32 (8 hosts x 4 chips). Self-contained: open in a browser.
+     The memory model in the <script> below is fitted to the fit/OOM outcomes measured on the slice (see the
+     "Predicted vs measured" table); its constants assume mesh 8x4, 8 rollouts per prompt and Qwen3 shapes. -->
+<title>v5e-32 RL Memory Planner</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@600&display=swap">
+<style>
+/* Layout: one reading column with a full-width planner band; reference sections below. */
+:root {
+  --bg: #f6f7f8; --surface: #ffffff; --ink: #16191d; --ink-2: #4a525c; --ink-3: #7b838d;
+  --rule: #dfe3e8; --accent: #0f6c74; --accent-soft: #e2f0f1;
+  --ok: #1b7a3e; --ok-soft: #e3f3e8; --bad: #b3261e; --bad-soft: #fbe7e5; --warn: #9a6400; --warn-soft: #fbf0d9;
+  --c-vllm: #2a78d6; --c-trainer: #1baf7a; --c-kv: #eda100; --c-runtime: #9aa3ad; --c-opt: #eb6834;
+  --c-act: #e87ba4; --c-logit: #6f52c9; --c-margin: #c9ced4;
+  --font-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --font-display: "IBM Plex Sans Condensed", "IBM Plex Sans", system-ui, sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #111417; --surface: #181c20; --ink: #eef1f4; --ink-2: #b5bdc6; --ink-3: #848d97;
+    --rule: #2b3138; --accent: #4fb3bb; --accent-soft: #15292b;
+    --ok: #59c27c; --ok-soft: #142a1c; --bad: #ff8a80; --bad-soft: #321716; --warn: #f0b34a; --warn-soft: #2e2410;
+    --c-vllm: #3987e5; --c-trainer: #199e70; --c-kv: #c98500; --c-runtime: #6b747e; --c-opt: #d95926;
+    --c-act: #d55181; --c-logit: #8f78e0; --c-margin: #3a4148; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #111417; --surface: #181c20; --ink: #eef1f4; --ink-2: #b5bdc6; --ink-3: #848d97;
+  --rule: #2b3138; --accent: #4fb3bb; --accent-soft: #15292b;
+  --ok: #59c27c; --ok-soft: #142a1c; --bad: #ff8a80; --bad-soft: #321716; --warn: #f0b34a; --warn-soft: #2e2410;
+  --c-vllm: #3987e5; --c-trainer: #199e70; --c-kv: #c98500; --c-runtime: #6b747e; --c-opt: #d95926;
+  --c-act: #d55181; --c-logit: #8f78e0; --c-margin: #3a4148; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--ink); font: 15px/1.55 var(--font-body); padding-inline: 16px; padding-block: 28px 64px; }
+.wrap { max-width: 1080px; margin: 0 auto; display: grid; gap: 40px; }
+h1, h2, h3 { font-family: var(--font-display); font-weight: 600; text-wrap: balance; margin: 0; letter-spacing: 0.005em; }
+h1 { font-size: 2.1rem; line-height: 1.15; }
+h2 { font-size: 1.45rem; }
+h3 { font-size: 1.05rem; font-family: var(--font-body); }
+p { margin: 0; max-width: 72ch; }
+.lede { color: var(--ink-2); font-size: 1.02rem; }
+.eyebrow { font: 500 0.72rem/1 var(--font-mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent); }
+.mono, code { font-family: var(--font-mono); font-size: 0.88em; }
+code { background: var(--accent-soft); padding: 0.05em 0.35em; border-radius: 4px; }
+section { display: grid; gap: 14px; }
+.muted { color: var(--ink-3); font-size: 0.86rem; }
+.panel { background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; padding: 20px; }
+.grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; }
+.grid2 > * { min-width: 0; }
+.scroll { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 0.88rem; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+th { font-weight: 600; color: var(--ink-2); font-size: 0.8rem; }
+td.num, th.num { text-align: right; }
+ul { margin: 0; padding-left: 1.1em; display: grid; gap: 6px; max-width: 76ch; }
+ol { margin: 0; padding-left: 1.3em; display: grid; gap: 8px; max-width: 76ch; }
+
+/* planner */
+.planner { display: grid; grid-template-columns: minmax(250px, 300px) 1fr; gap: 24px; }
+.planner > * { min-width: 0; }
+@media (max-width: 760px) { .planner { grid-template-columns: 1fr; } }
+.controls { display: grid; gap: 12px; align-content: start; }
+.field { display: grid; gap: 4px; }
+.field label { font-size: 0.8rem; font-weight: 600; color: var(--ink-2); display: flex; justify-content: space-between; gap: 8px; }
+.field label output { font-family: var(--font-mono); font-weight: 500; color: var(--ink); }
+select, input[type="number"] { font: inherit; font-size: 0.9rem; padding: 6px 8px; border: 1px solid var(--rule); border-radius: 6px; background: var(--bg); color: var(--ink); width: 100%; }
+input[type="range"] { width: 100%; accent-color: var(--accent); }
+.seg { display: flex; border: 1px solid var(--rule); border-radius: 6px; overflow: hidden; }
+.seg button { flex: 1; font: inherit; font-size: 0.85rem; padding: 6px 4px; background: var(--bg); color: var(--ink-2); border: 0; border-right: 1px solid var(--rule); cursor: pointer; }
+.seg button:last-child { border-right: 0; }
+.seg button[aria-pressed="true"] { background: var(--accent); color: var(--surface); font-weight: 600; }
+button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.verdict { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.pill { font: 600 0.8rem/1 var(--font-mono); padding: 6px 10px; border-radius: 999px; letter-spacing: 0.03em; }
+.pill.ok { background: var(--ok-soft); color: var(--ok); }
+.pill.bad { background: var(--bad-soft); color: var(--bad); }
+.pill.warn { background: var(--warn-soft); color: var(--warn); }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px 18px; }
+.stat { display: grid; gap: 2px; }
+.stat .k { font-size: 0.75rem; color: var(--ink-3); }
+.stat .v { font: 500 1.05rem/1.2 var(--font-mono); font-variant-numeric: tabular-nums; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 0.78rem; color: var(--ink-2); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.sw { width: 11px; height: 11px; border-radius: 3px; display: inline-block; }
+.reco { border-left: 3px solid var(--accent); padding: 4px 0 4px 12px; display: grid; gap: 6px; }
+svg text { fill: var(--ink-2); font-family: var(--font-mono); font-size: 11px; }
+svg .ink { fill: var(--ink); }
+.diagram-host { fill: var(--surface); stroke: var(--rule); }
+.yes { color: var(--ok); font-weight: 600; }
+.no { color: var(--bad); font-weight: 600; }
+@media (prefers-reduced-motion: no-preference) { .bar rect { transition: width 0.25s ease, x 0.25s ease; } }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+
+<header style="display:grid; gap:12px">
+  <div class="eyebrow">Tunix + vLLM on TPU v5e-32 · Qwen3 4B / 8B / 14B</div>
+  <h1>v5e-32 RL Memory Planner</h1>
+  <p class="lede">How the slice is laid out, where each chip's 15.75 GiB goes, and how that changes with model size,
+  context length, chunk size and micro-batch. The planner applies a memory model fitted to every fit/OOM we measured
+  (29 of 29 reproduced), so you can check a workload before spending a slice-hour on it.</p>
+</header>
+
+<!-- ============ PLANNER ============ -->
+<section id="planner" class="panel" aria-labelledby="planner-h">
+  <div style="display:grid; gap:4px">
+    <div class="eyebrow">Planner</div>
+    <h2 id="planner-h">Will it fit, and how fast?</h2>
+  </div>
+  <div class="planner">
+    <div class="controls">
+      <div class="field"><label for="model">Model</label>
+        <div class="seg" id="model" role="group" aria-label="Model">
+          <button data-v="4B" aria-pressed="true">4B</button><button data-v="8B" aria-pressed="false">8B</button><button data-v="14B" aria-pressed="false">14B</button>
+        </div></div>
+      <div class="field"><label for="algo">Algorithm</label>
+        <div class="seg" id="algo" role="group" aria-label="Algorithm">
+          <button data-v="grpo" aria-pressed="true">GRPO</button><button data-v="ppo" aria-pressed="false">PPO + critic</button>
+        </div></div>
+      <div class="field"><label for="mode">Fine-tuning</label>
+        <div class="seg" id="mode" role="group" aria-label="Fine-tuning">
+          <button data-v="lora" aria-pressed="true">LoRA r32</button><button data-v="full" aria-pressed="false">Full</button>
+        </div></div>
+      <div class="field"><label for="cap">Completion cap <output id="cap-o"></output></label>
+        <input type="range" id="cap" min="0" max="7" step="1" value="3"></div>
+      <div class="field"><label for="prompt">Prompt cap (tokens)</label>
+        <input type="number" id="prompt" value="768" min="128" max="4096" step="128"></div>
+      <div class="field"><label for="chunk">Log-prob chunk</label>
+        <select id="chunk"><option value="0">none</option><option value="512" selected>512</option><option value="1024">1024</option><option value="2048">2048</option><option value="4096">4096</option></select></div>
+      <div class="field"><label for="micro">Prompts per micro-step <output id="micro-o"></output></label>
+        <input type="range" id="micro" min="1" max="8" step="1" value="1"></div>
+      <div class="field"><label for="share">vLLM memory share <output id="share-o"></output></label>
+        <input type="range" id="share" min="0.15" max="0.95" step="0.01" value="0.30"></div>
+      <div class="field"><label for="batch">Prompts per step × rollouts per prompt</label>
+        <div style="display:flex; gap:8px"><input type="number" id="batch" value="16" min="1" max="256" aria-label="Prompts per step"><input type="number" id="group" value="8" min="2" max="32" aria-label="Rollouts per prompt"></div></div>
+      <button id="autoshare" style="font:inherit; font-size:0.85rem; padding:8px; border-radius:6px; border:1px solid var(--accent); background:var(--accent-soft); color:var(--accent); font-weight:600; cursor:pointer">Set share to recommended</button>
+    </div>
+
+    <div style="display:grid; gap:16px; align-content:start">
+      <div class="verdict"><span id="verdict" class="pill ok">FITS</span><span id="verdict-txt" class="muted"></span></div>
+      <div>
+        <svg id="bar" class="bar" viewBox="0 0 700 92" width="100%" role="img" aria-label="Per-chip memory breakdown"></svg>
+        <div class="legend" id="legend"></div>
+      </div>
+      <div class="stats" id="stats"></div>
+      <div class="reco" id="reco"></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ HARDWARE & LAYOUT ============ -->
+<section aria-labelledby="hw-h">
+  <div class="eyebrow">1 · Hardware and layout</div>
+  <h2 id="hw-h">Two copies of the model, split two different ways</h2>
+  <div class="panel scroll">
+    <svg viewBox="0 0 980 250" width="100%" style="min-width:720px" role="img" aria-label="Slice layout: 8 hosts of 4 chips; trainer sharded over all 32 chips; one vLLM copy per host except hosts 0 and 5">
+      <g id="hosts"></g>
+    </svg>
+  </div>
+  <div class="grid2">
+    <div class="panel" style="display:grid; gap:10px">
+      <h3>Slice</h3>
+      <table>
+        <tr><td>Topology</td><td class="mono">v5litepod-32: 8 hosts × 4 chips</td></tr>
+        <tr><td>HBM per chip</td><td class="mono">16 GB = 15.75 GiB usable</td></tr>
+        <tr><td>Peak compute per chip</td><td class="mono">197 TFLOP/s bf16</td></tr>
+        <tr><td>Processes</td><td class="mono">8 JAX processes (one per host), one program</td></tr>
+        <tr><td>Interconnect</td><td>ICI between all 32 chips; weight sync to vLLM goes through host memory</td></tr>
+      </table>
+    </div>
+    <div class="panel" style="display:grid; gap:10px">
+      <h3>Where each model lives</h3>
+      <table>
+        <tr><th>Copy</th><th>Split over</th><th>Per chip</th></tr>
+        <tr><td>Trainer (actor; reference for full FT; critic for PPO)</td><td>all 32 chips: FSDP 8 (hosts) × TP 4 (chips)</td><td class="mono">1/32 each</td></tr>
+        <tr><td>vLLM rollout engine</td><td>one host's 4 chips (TP 4); 6 copies on hosts 1–4, 6, 7</td><td class="mono">1/4 of the model</td></tr>
+        <tr><td>KV cache</td><td>inside each vLLM copy</td><td class="mono">36 MiB / 1k tok (4B, 8B) · 40 (14B)</td></tr>
+      </table>
+      <p class="muted">Host 0 (slice origin) cannot run a local multi-chip vLLM program; host 5's vLLM crashes after its first
+      weight sync on every v5e-32 we tried. Both still train. LoRA shares the base weights with the reference model, so a
+      LoRA run keeps one trainer copy (two with PPO's critic).</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============ MEMORY ANATOMY ============ -->
+<section aria-labelledby="anat-h">
+  <div class="eyebrow">2 · Per-chip memory</div>
+  <h2 id="anat-h">The vLLM share draws a line across every chip</h2>
+  <p>vLLM's <code>hbm_utilization</code> share is a line at <span class="mono">share × 15.75 GiB</span>. When vLLM starts,
+  everything already on the chip (trainer weights) plus vLLM's own weights count against it, and vLLM fills the rest up to
+  the line with KV cache. Everything allocated later lives above the line: optimizer state for full fine-tuning, the
+  training step's activations and logits, and some fixed runtime overhead. vLLM's memory stays put during training.</p>
+  <div class="panel scroll">
+    <table>
+      <thead><tr><th>Component</th><th>Where</th><th>Formula (per chip)</th><th class="num">4B</th><th class="num">8B</th><th class="num">14B</th></tr></thead>
+      <tbody id="consts"></tbody>
+    </table>
+  </div>
+  <p class="muted">Two conditions must hold. vLLM must fit one maximum-length request in its KV pool
+  (prompt cap + completion cap + 256 tokens), or it refuses to start. And the training step must fit above the line:
+  activations + logits + optimizer + 0.3 GiB margin ≤ 15.75 − line − fixed overhead.</p>
+</section>
+
+<!-- ============ SCALING ============ -->
+<section aria-labelledby="scale-h">
+  <div class="eyebrow">3 · Scaling</div>
+  <h2 id="scale-h">Training memory by context and chunk size</h2>
+  <p>Per micro-step, each FSDP group holds one sequence per prompt (8 rollouts over 8 groups), so activation memory per chip
+  grows linearly with sequence length and with prompts per micro-step. The fp32 logits are the other big term: without
+  chunking they scale with the completion length; chunking caps them at the chunk size. The chart uses the planner's
+  model, algorithm and settings; the dashed line is the room above the vLLM line at the current share.</p>
+  <div class="panel">
+    <svg id="scale" viewBox="0 0 720 340" width="100%" role="img" aria-label="Training-step memory versus completion cap for each chunk size"></svg>
+    <div class="legend" id="scale-legend"></div>
+  </div>
+  <div class="grid2">
+    <div class="panel" style="display:grid; gap:10px">
+      <h3>Chunk size: speed and reach (4B, measured)</h3>
+      <table>
+        <thead><tr><th>Chunk</th><th class="num">Train time at 8k</th><th class="num">vs none</th><th class="num">Max context</th></tr></thead>
+        <tbody>
+          <tr><td>none</td><td class="num">28.9 s</td><td class="num">1.00×</td><td class="num">≈ 23k</td></tr>
+          <tr><td>512</td><td class="num">30.2 s</td><td class="num">1.04×</td><td class="num">≥ 48k (inferred)</td></tr>
+          <tr><td>1024</td><td class="num">38.1 s</td><td class="num">1.32×</td><td class="num">≈ 48k</td></tr>
+          <tr><td>2048</td><td class="num">35.4 s</td><td class="num">1.22×</td><td class="num">≈ 40k</td></tr>
+          <tr><td>4096</td><td class="num">32.0 s</td><td class="num">1.11×</td><td class="num">≥ 32k</td></tr>
+        </tbody>
+      </table>
+      <p class="muted">GRPO LoRA, 16 × 8 rollouts, 1 prompt per micro-step, median of 3 steps. Chunk 512 is both the cheapest
+      chunked setting and the longest-reaching; there is no reason to use 1024–4096.</p>
+    </div>
+    <div class="panel" style="display:grid; gap:10px">
+      <h3>Prompts per micro-step: the big speed lever</h3>
+      <table>
+        <thead><tr><th>1k cap, 16 × 8, LoRA</th><th class="num">1 prompt</th><th class="num">4 prompts</th></tr></thead>
+        <tbody>
+          <tr><td>GRPO train time</td><td class="num">11.5 s</td><td class="num">4.3 s</td></tr>
+          <tr><td>PPO train time (critic)</td><td class="num">25.0 s (13.0)</td><td class="num">8.7 s (4.4)</td></tr>
+        </tbody>
+      </table>
+      <p class="muted">Each micro-step all-gathers every layer's weights across the 8 hosts; more prompts per micro-step
+      amortise that. Memory scales with it linearly, so it is a short-context lever: use the largest value that fits.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============ SPEED ============ -->
+<section aria-labelledby="speed-h">
+  <div class="eyebrow">4 · Step time</div>
+  <h2 id="speed-h">Measured step times</h2>
+  <div class="panel scroll">
+    <table>
+      <thead><tr><th>Model</th><th>Config</th><th class="num">4k</th><th class="num">8k</th><th class="num">16k</th><th class="num">32k</th><th>Train-time share</th></tr></thead>
+      <tbody>
+        <tr><td>4B</td><td>GRPO LoRA</td><td class="num">93 s</td><td class="num">110 s</td><td class="num">227 s</td><td class="num">327 s</td><td>19% → 79%</td></tr>
+        <tr><td>4B</td><td>GRPO full</td><td class="num">101 s</td><td class="num">104 s</td><td class="num">227 s</td><td class="num">335 s</td><td>26% → 76%</td></tr>
+        <tr><td>4B</td><td>PPO LoRA</td><td class="num">109 s</td><td class="num">142 s</td><td class="num">305 s</td><td class="num">597 s</td><td>29% → 84%</td></tr>
+        <tr><td>4B</td><td>PPO full</td><td class="num">125 s</td><td class="num">150 s</td><td class="num">289 s</td><td class="num no">OOM</td><td></td></tr>
+        <tr><td>8B</td><td>GRPO LoRA</td><td class="num">164 s</td><td class="num">130 s</td><td class="num">257 s</td><td class="num no">OOM</td><td></td></tr>
+        <tr><td>8B</td><td>GRPO full</td><td class="num">~131 s</td><td class="num">~141 s</td><td class="num no">OOM</td><td class="num no">OOM</td><td></td></tr>
+        <tr><td>8B</td><td>PPO LoRA</td><td class="num">141 s</td><td class="num">190 s</td><td class="num">424 s</td><td class="num no">OOM</td><td></td></tr>
+        <tr><td>8B</td><td>PPO full</td><td class="num">221 s</td><td class="num no">OOM</td><td class="num no">OOM</td><td class="num no">OOM</td><td></td></tr>
+        <tr><td>14B</td><td>GRPO LoRA</td><td class="num">144 s</td><td class="num no">OOM</td><td class="num no">OOM</td><td class="num no">OOM</td><td></td></tr>
+        <tr><td>14B</td><td>PPO LoRA</td><td class="num">245 s</td><td class="num no">OOM</td><td class="num no">OOM</td><td class="num no">OOM</td><td></td></tr>
+        <tr><td>14B</td><td>full (either)</td><td class="num no">OOM</td><td class="num no">OOM</td><td class="num no">OOM</td><td class="num no">OOM</td><td></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="muted">Planner estimates: training time is interpolated from these measurements (chunk and micro-step factors
+  applied); rollout time assumes every sample runs to the cap, so natural-length rollouts are usually faster. Rollouts and
+  training are each ±~20–30%.</p>
+  <p class="muted">16 prompts × 8 rollouts, chunk 1024, 1 prompt per micro-step, natural-length rollouts (training pads to the
+  cap), 2 steps per cap (±~20%). Weight sync per step: ~4.5 s (4B), ~9.5 s (8B), ~22 s (14B). At a 1k cap with all speedups:
+  GRPO 30.7 s, PPO 36.7 s per step.</p>
+</section>
+
+<!-- ============ RECIPE ============ -->
+<section aria-labelledby="recipe-h">
+  <div class="eyebrow">5 · Choosing hyperparameters</div>
+  <h2 id="recipe-h">A procedure for a new workload</h2>
+  <ol>
+    <li><strong>Fix the context.</strong> Prompt cap + completion cap set both vLLM's minimum KV
+      (one request must fit) and training memory (training pads every sequence to the cap). Don't set the cap far above
+      what completions need: it costs training time even when rollouts stop early.</li>
+    <li><strong>Pick the chunk.</strong> No chunking if logits fit at your context (short contexts); otherwise 512.</li>
+    <li><strong>Find the share window.</strong> Lowest share: vLLM weights + trainer copies + overhead + KV for one
+      max-length request. Highest share: whatever leaves room above the line for the training step. Use the planner's
+      button; it picks the middle of the window, biased toward more KV.</li>
+    <li><strong>Raise prompts per micro-step</strong> as far as the window allows. That is the largest free speedup at
+      short context; at long context it is usually 1.</li>
+    <li><strong>Check KV concurrency.</strong> Each vLLM copy decodes about batch × group ÷ 6 rollouts at once. If its KV
+      pool holds fewer than that many full-length rollouts, vLLM runs them in waves: rollouts slow down but nothing fails.
+      Prefer spending spare memory on KV at long context and on micro-step size at short context.</li>
+    <li><strong>If it doesn't fit</strong>, in order: LoRA instead of full fine-tuning (full adds ~12 bytes per parameter
+      of optimizer and gradient state, ×2 for PPO's critic); GRPO instead of PPO; a shorter cap. For 14B, the structural
+      fix is splitting each vLLM copy over 2 hosts, which halves its ~6.9 GiB per chip; that is not implemented yet.</li>
+  </ol>
+  <div class="panel" style="display:grid; gap:10px">
+    <h3>Algorithm settings that trained stably (MATH, Qwen3-4B-Base, LoRA r32, 32 × 8 per step)</h3>
+    <table>
+      <thead><tr><th>Algorithm</th><th>LR</th><th>Notes</th><th class="num">MATH-500 at step ~100</th></tr></thead>
+      <tbody>
+        <tr><td>GRPO + IS correction</td><td class="mono">2e-5</td><td>β 0, clip 0.2 / 0.28, token-mean; truncated IS cap 2</td><td class="num">77.2%</td></tr>
+        <tr><td>Dr. GRPO + IS correction</td><td class="mono">1e-5</td><td>no std normalization, constant-length loss</td><td class="num">75.1%</td></tr>
+        <tr><td>PPO</td><td class="mono">2e-5</td><td>critic LoRA 5e-5, γ = λ = 1, no KL</td><td class="num">76.0% (step 80)</td></tr>
+        <tr><td>GRPO / Dr. GRPO without IS correction</td><td class="mono">1–2e-5</td><td>collapsed (length blow-up) by step 40–60</td><td class="num no">3–49%</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ============ CALIBRATION ============ -->
+<section aria-labelledby="cal-h">
+  <div class="eyebrow">6 · How good is the model</div>
+  <h2 id="cal-h">Predicted vs measured</h2>
+  <p>Every configuration we ran on the 32-chip slice after the batch-duplication fix, predicted from scratch by the
+  planner's model. Margins under ~0.5 GiB are within the model's error, so treat a planner result that fits by less than
+  that as a coin flip.</p>
+  <div class="panel scroll">
+    <table>
+      <thead><tr><th>Model</th><th>Config</th><th class="num">Cap</th><th class="num">Chunk</th><th class="num">Prompts / micro</th><th class="num">Share</th><th class="num">Training need</th><th class="num">Room</th><th>Predicted</th><th>Measured</th></tr></thead>
+      <tbody id="cal"></tbody>
+    </table>
+  </div>
+  <p class="muted">Assumptions behind the model: mesh 8 × 4 (FSDP over hosts), 8 rollouts per prompt, whole-layer
+  rematerialisation, Qwen3 vocabulary (151,936), bf16 weights, 6 vLLM copies of TP 4. The fixed overhead above the line
+  (1.0 / 1.15 / 2.4 GiB) and vLLM's own overhead inside the line (0 / 0.9 / 1.1 GiB) were fitted to these runs; the
+  activation and logit terms come from the model shapes.</p>
+</section>
+
+</div>
+
+<script>
+const HBM = 15.75, GIB = 2 ** 30, LOGIT = 0.22, OPT_B = 12, MARGIN = 0.3, REPLICAS = 6, FSDP = 8;
+const MODELS = {
+  "4B":  { P: 4.02e9,  h: 2560, L: 36, kv: 144, oin: 0.0, oout: 1.0,  sync: 4.5,  tput: [[1.79, 15.1], [4.9, 35.6], [9.0, 30.1], [17.2, 23.3], [33.5, 16.6]] },
+  "8B":  { P: 8.19e9,  h: 4096, L: 36, kv: 144, oin: 0.9, oout: 1.15, sync: 9.5,  tput: [[4.9, 22.9], [9.0, 20.3], [17.2, 17.3]] },
+  "14B": { P: 14.77e9, h: 5120, L: 40, kv: 160, oin: 1.1, oout: 2.4,  sync: 22,   tput: [[4.9, 16.0]] },
+};
+const CAPS = [1024, 2048, 4096, 8192, 16384, 32768, 40960, 49152];
+const CHUNK_SPEED = { 0: 0.76, 512: 0.79, 1024: 1.0, 2048: 0.93, 4096: 0.84 };
+const COLORS = { vllm: "--c-vllm", trainer: "--c-trainer", kv: "--c-kv", runtime: "--c-runtime", opt: "--c-opt", act: "--c-act", logit: "--c-logit", margin: "--c-margin" };
+const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const fmt = (x, d = 2) => x.toFixed(d);
+const kfmt = (t) => t >= 1000 ? (t / 1000).toFixed(t >= 10000 ? 0 : 1) + "k" : String(Math.round(t));
+
+function model(cfg) {
+  const m = MODELS[cfg.model], W = m.P * 2 / GIB;
+  const ncopies = { "grpo|lora": 1, "ppo|lora": 2, "grpo|full": 2, "ppo|full": 3 }[cfg.algo + "|" + cfg.mode];
+  const vllmW = W / 4, trainerW = ncopies * W / 32;
+  const R = vllmW + trainerW + m.oin;
+  const line = cfg.share * HBM;
+  const kvChip = Math.max(line - R, 0);
+  const kvTokens = kvChip * 4 * GIB / (m.kv * 1024);
+  const needTokens = cfg.prompt + cfg.cap + 256;
+  const seqPerGroup = Math.max(1, Math.ceil(cfg.micro * cfg.group / FSDP));
+  const act = seqPerGroup * (cfg.prompt + cfg.cap) / 1000 * (m.h * m.L * 2 * 1000 / GIB);
+  const logit = seqPerGroup * LOGIT * (cfg.chunk ? cfg.chunk / 1000 : cfg.cap / 1000);
+  const opt = cfg.mode === "full" ? OPT_B * m.P / 32 / GIB * (cfg.algo === "ppo" ? 2 : 1) : 0;
+  const need = act + logit + opt + MARGIN;
+  const room = HBM - line - m.oout;
+  const kvOk = kvTokens >= needTokens, trainOk = need <= room;
+  // share window: lowest share that holds one request; highest share that leaves room for training
+  const minShare = (R + needTokens * m.kv * 1024 / 4 / GIB) / HBM;
+  const maxShare = (HBM - m.oout - need) / HBM;
+  return { m, W, vllmW, trainerW, oin: m.oin, kvChip, kvTokens, needTokens, act, logit, opt, need, room, line,
+           kvOk, trainOk, ok: kvOk && trainOk, minShare, maxShare, seqPerGroup };
+}
+
+function stepEstimate(cfg, r) {
+  const m = r.m, L = (cfg.prompt + cfg.cap) / 1000;
+  const t = m.tput;
+  let tp;
+  const ref = MODELS["4B"].tput;
+  const f4 = (x) => { if (x <= ref[0][0]) return ref[0][1]; for (let i = 1; i < ref.length; i++) if (x <= ref[i][0]) { const [x0, y0] = ref[i - 1], [x1, y1] = ref[i]; return y0 + (y1 - y0) * (Math.log(x) - Math.log(x0)) / (Math.log(x1) - Math.log(x0)); } return ref[ref.length - 1][1] * Math.pow(ref[ref.length - 1][0] / x, 0.6); };
+  if (L <= t[0][0]) tp = t[0][1] * f4(L) / f4(t[0][0]);
+  else if (L >= t[t.length - 1][0]) {
+    const last = t[t.length - 1];
+    tp = last[1] * f4(L) / f4(last[0]);
+  } else {
+    for (let i = 1; i < t.length; i++) if (L <= t[i][0]) { const [x0, y0] = t[i - 1], [x1, y1] = t[i]; tp = y0 + (y1 - y0) * (Math.log(L) - Math.log(x0)) / (Math.log(x1) - Math.log(x0)); break; }
+  }
+  const seqs = cfg.batch * cfg.group;
+  let train = seqs * L * 1000 / (tp * 1000) * CHUNK_SPEED[cfg.chunk];
+  const microGain = 1 + (cfg.micro - 1) * 0.56 * Math.min(1, 2.0 / L);
+  train /= microGain;
+  if (cfg.algo === "ppo") train *= 1.9;
+  if (cfg.mode === "full") train += 2.2 * m.P / 1e9 * (cfg.algo === "ppo" ? 2 : 1);
+  // rollout if every sample runs to the cap: decode throughput per vLLM copy (4B ~1,000 tok/s measured at 1k and at
+  // 8k forced), but never faster than one token per ~20 ms step for the longest sample
+  const perReplica = seqs / REPLICAS;
+  const thr = { "4B": 1000, "8B": 700, "14B": 450 }[cfg.model];
+  const msPerTok = { "4B": 20, "8B": 26, "14B": 36 }[cfg.model];
+  const rolloutWorst = Math.max(cfg.cap * msPerTok / 1000, perReplica * cfg.cap / thr);
+  return { train, rolloutWorst, sync: m.sync, perReplica };
+}
+
+const state = { model: "4B", algo: "grpo", mode: "lora" };
+const $ = (id) => document.getElementById(id);
+function cfg() {
+  return { ...state, cap: CAPS[+$("cap").value], prompt: Math.max(128, +$("prompt").value || 768), chunk: +$("chunk").value,
+           micro: +$("micro").value, share: +$("share").value, batch: Math.max(1, +$("batch").value || 16), group: Math.max(2, +$("group").value || 8) };
+}
+
+function drawBar(r) {
+  const svg = $("bar"), W = 700, x0 = 0, y = 26, h = 30, s = W / HBM;
+  const parts = [
+    ["vllm", r.vllmW, "vLLM weights (1/4 of model)"], ["trainer", r.trainerW + r.oin, "Trainer copies + vLLM overhead"],
+    ["kv", r.kvChip, "KV cache pool"], ["runtime", r.m.oout, "Fixed overhead above the line"],
+    ["opt", r.opt, "Optimizer + grads (full FT)"], ["act", r.act, "Activations"], ["logit", r.logit, "Logits"], ["margin", MARGIN, "Margin"],
+  ];
+  let x = x0, out = "";
+  for (const [k, v] of parts) {
+    if (v <= 0) continue;
+    const w = v * s;
+    out += `<rect x="${x.toFixed(1)}" y="${y}" width="${Math.max(w - 1.5, 0.5).toFixed(1)}" height="${h}" rx="3" fill="${css(COLORS[k])}"><title>${parts.find(p => p[0] === k)[2]}: ${fmt(v)} GiB</title></rect>`;
+    x += w;
+  }
+  const lineX = r.line * s, full = HBM * s;
+  out += `<rect x="0" y="${y}" width="${full}" height="${h}" rx="3" fill="none" stroke="${css("--rule")}"/>`;
+  out += `<line x1="${lineX}" x2="${lineX}" y1="${y - 8}" y2="${y + h + 8}" stroke="${css("--ink")}" stroke-width="1.5" stroke-dasharray="3 2"/>`;
+  out += `<text x="${Math.min(lineX + 4, W - 120)}" y="${y - 10}" class="ink">vLLM line ${fmt(r.line)} GiB</text>`;
+  if (x > full) out += `<text x="${W}" y="${y + h + 22}" text-anchor="end" fill="${css("--bad")}">over by ${fmt((x - full) / s)} GiB</text>`;
+  out += `<text x="0" y="${y + h + 22}">0</text><text x="${full}" y="${y + h + 22}" text-anchor="end">15.75 GiB</text>`;
+  svg.innerHTML = out;
+  $("legend").innerHTML = parts.filter(p => p[1] > 0).map(([k, v, label]) => `<span><i class="sw" style="background:var(${COLORS[k]})"></i>${label} <b class="mono">${fmt(v)}</b></span>`).join("");
+}
+
+function render() {
+  const c = cfg();
+  $("cap-o").textContent = kfmt(c.cap) + " tokens";
+  $("micro-o").textContent = c.micro + (c.micro === 1 ? " prompt" : " prompts");
+  $("share-o").textContent = c.share.toFixed(2) + " (" + fmt(c.share * HBM, 1) + " GiB)";
+  const r = model(c), sp = stepEstimate(c, r);
+  drawBar(r);
+  const v = $("verdict"), vt = $("verdict-txt");
+  const margin = r.room - r.need;
+  if (!r.kvOk) { v.className = "pill bad"; v.textContent = "vLLM WON'T START"; vt.textContent = `KV pool holds ${kfmt(r.kvTokens)} tokens; one max-length request needs ${kfmt(r.needTokens)}. Raise the share to ≥ ${fmt(r.minShare)}.`; }
+  else if (!r.trainOk) { v.className = "pill bad"; v.textContent = "TRAINING OOM"; vt.textContent = `Training step needs ${fmt(r.need)} GiB; ${fmt(r.room)} GiB is free above the line.`; }
+  else if (margin < 0.5) { v.className = "pill warn"; v.textContent = "BORDERLINE"; vt.textContent = `Fits with ${fmt(margin)} GiB to spare, within the model's error.`; }
+  else { v.className = "pill ok"; v.textContent = "FITS"; vt.textContent = `${fmt(margin)} GiB to spare above the line.`; }
+  const conc = r.kvTokens / (c.prompt + c.cap);
+  $("stats").innerHTML = [
+    ["Training step needs", fmt(r.need) + " GiB"], ["Room above the line", fmt(r.room) + " GiB"],
+    ["KV pool per vLLM copy", kfmt(r.kvTokens) + " tokens"], ["Full-length rollouts at once", fmt(conc, 1) + " of " + fmt(sp.perReplica, 1)],
+    ["Share window", r.minShare <= r.maxShare ? `${fmt(r.minShare)} – ${fmt(r.maxShare)}` : "empty"],
+    ["Est. training time", "~" + Math.round(sp.train) + " s"], ["Est. rollout, all at cap", "~" + Math.round(sp.rolloutWorst) + " s"],
+    ["Weight sync", "~" + sp.sync + " s"],
+  ].map(([k, v2]) => `<div class="stat"><span class="k">${k}</span><span class="v">${v2}</span></div>`).join("");
+  // recommendations
+  const recs = [];
+  if (r.minShare > r.maxShare) {
+    recs.push(`<b>No share works for this configuration.</b> vLLM needs at least ${fmt(r.minShare)} to start, but training needs the share at or below ${fmt(Math.max(r.maxShare, 0))}.`);
+    if (c.micro > 1) recs.push(`Drop to 1 prompt per micro-step.`);
+    if (c.mode === "full") recs.push(`Switch to LoRA (saves ${fmt(r.opt)} GiB of optimizer state per chip).`);
+    if (c.chunk === 0 || c.chunk > 512) recs.push(`Use chunk 512 (logits drop to ${fmt(r.seqPerGroup * LOGIT * 0.512)} GiB).`);
+    recs.push(`Or lower the completion cap: the planner's chart below shows where each chunk size runs out.`);
+  } else {
+    // largest micro that fits at the recommended share
+    let best = 1;
+    for (let mi = 1; mi <= 8; mi++) { const rr = model({ ...c, micro: mi, share: r.minShare + 0.02 }); if (rr.ok && rr.room - rr.need >= 0.5 && c.batch % mi === 0) best = mi; }
+    const reco = recommendShare(c);
+    recs.push(`<b>Recommended share: ${fmt(reco)}</b>: the window is ${fmt(r.minShare)}–${fmt(r.maxShare)}; the recommendation keeps 0.5 GiB of training headroom and gives the rest to KV.`);
+    if (best > c.micro) recs.push(`You can raise prompts per micro-step to <b>${best}</b> (at the window's low end), which is the biggest free speedup at short context.`);
+    if (conc < sp.perReplica && c.cap >= 8192) recs.push(`KV holds ${fmt(conc, 1)} of ~${fmt(sp.perReplica, 1)} rollouts per vLLM copy at full length, so long rollouts run in waves. Spare memory is better spent on KV than on a bigger micro-step here.`);
+    if (c.chunk !== 512 && c.chunk !== 0) recs.push(`Chunk 512 reaches further than ${c.chunk} and trains faster (measured at 8k).`);
+    if (c.chunk === 0 && c.cap >= 16384) recs.push(`At this length, chunking (512) frees ${fmt(r.logit - r.seqPerGroup * LOGIT * 0.512)} GiB for about 4% more training time.`);
+  }
+  $("reco").innerHTML = recs.map(x => `<p>${x}</p>`).join("");
+  drawScale(c);
+}
+
+function recommendShare(c) {
+  const r = model(c);
+  if (r.minShare > r.maxShare) return r.minShare;
+  const hi = (HBM - r.m.oout - r.need - 0.5) / HBM;
+  return Math.max(r.minShare + 0.01, Math.min(hi, r.maxShare));
+}
+
+function drawScale(c) {
+  const svg = $("scale"), W = 720, H = 340, pl = 54, pr = 20, pt = 18, pb = 44;
+  const caps = [1024, 2048, 4096, 8192, 16384, 32768, 49152, 65536];
+  const chunks = [[0, "none", "--c-logit"], [512, "512", "--c-trainer"], [1024, "1024", "--c-vllm"], [2048, "2048", "--c-opt"], [4096, "4096", "--c-act"]];
+  const series = chunks.map(([ch, label, col]) => ({ label, col, pts: caps.map(cp => [cp, model({ ...c, cap: cp, chunk: ch }).need]) }));
+  const room = model(c).room;
+  const ymax = Math.max(16, Math.ceil(Math.min(Math.max(...series.flatMap(s => s.pts.map(p => p[1]))), 30) / 2) * 2);
+  const lx = (cp) => pl + (Math.log2(cp) - 10) / (16 - 10) * (W - pl - pr);
+  const ly = (v) => pt + (1 - Math.min(v, ymax) / ymax) * (H - pt - pb);
+  let out = "";
+  for (let g = 0; g <= ymax; g += (ymax > 20 ? 4 : 2)) out += `<line x1="${pl}" x2="${W - pr}" y1="${ly(g)}" y2="${ly(g)}" stroke="${css("--rule")}"/><text x="${pl - 8}" y="${ly(g) + 4}" text-anchor="end">${g}</text>`;
+  for (const cp of caps) out += `<text x="${lx(cp)}" y="${H - pb + 18}" text-anchor="middle">${kfmt(cp)}</text>`;
+  out += `<text x="${(pl + W - pr) / 2}" y="${H - 6}" text-anchor="middle">completion cap (tokens, log scale)</text>`;
+  out += `<text x="14" y="${(pt + H - pb) / 2}" transform="rotate(-90 14 ${(pt + H - pb) / 2})" text-anchor="middle">training-step GiB per chip</text>`;
+  if (room > 0) {
+    out += `<line x1="${pl}" x2="${W - pr}" y1="${ly(room)}" y2="${ly(room)}" stroke="${css("--bad")}" stroke-width="1.5" stroke-dasharray="6 4"/>`;
+    out += `<text x="${W - pr}" y="${ly(room) - 6}" text-anchor="end" fill="${css("--bad")}">room at share ${c.share.toFixed(2)}: ${fmt(room, 1)} GiB</text>`;
+  }
+  for (const s of series) {
+    const d = s.pts.map((p, i) => `${i ? "L" : "M"}${lx(p[0]).toFixed(1)},${ly(p[1]).toFixed(1)}`).join(" ");
+    out += `<path d="${d}" fill="none" stroke="${css(s.col)}" stroke-width="2.2"/>`;
+    for (const p of s.pts) out += `<circle cx="${lx(p[0])}" cy="${ly(p[1])}" r="3.5" fill="${css(s.col)}" stroke="${css("--surface")}" stroke-width="1.5"><title>chunk ${s.label}, ${kfmt(p[0])}: ${fmt(p[1])} GiB</title></circle>`;
+  }
+  const cur = model(c);
+  out += `<circle cx="${lx(c.cap)}" cy="${ly(cur.need)}" r="7" fill="none" stroke="${css("--ink")}" stroke-width="1.5"><title>current settings</title></circle>`;
+  svg.innerHTML = out;
+  $("scale-legend").innerHTML = series.map(s => `<span><i class="sw" style="background:var(${s.col})"></i>chunk ${s.label}</span>`).join("") +
+    `<span><i class="sw" style="background:transparent; border:1.5px solid var(--ink); border-radius:50%"></i>current settings</span>`;
+}
+
+function hosts() {
+  const g = $("hosts"); let out = "";
+  const hw = 112, gap = 9, x0 = 8, y0 = 30;
+  out += `<text x="${x0}" y="16" class="ink">Trainer mesh: FSDP 8 across hosts × TP 4 within each host. Every chip holds 1/32 of each trainer copy.</text>`;
+  for (let i = 0; i < 8; i++) {
+    const x = x0 + i * (hw + gap), noV = i === 0 || i === 5;
+    out += `<rect class="diagram-host" x="${x}" y="${y0}" width="${hw}" height="176" rx="8"/>`;
+    out += `<text x="${x + 10}" y="${y0 + 18}" class="ink">host ${i}</text>`;
+    for (let c = 0; c < 4; c++) {
+      const cx = x + 10 + (c % 2) * 48, cy = y0 + 30 + Math.floor(c / 2) * 62;
+      out += `<rect x="${cx}" y="${cy}" width="44" height="54" rx="5" fill="${css("--bg")}" stroke="${css("--rule")}"/>`;
+      out += `<rect x="${cx + 4}" y="${cy + 4}" width="36" height="9" rx="2" fill="${css("--c-trainer")}"><title>1/32 of each trainer copy</title></rect>`;
+      if (!noV) out += `<rect x="${cx + 4}" y="${cy + 16}" width="36" height="26" rx="2" fill="${css("--c-vllm")}"><title>1/4 of this host's vLLM copy</title></rect>`;
+      out += `<text x="${cx + 22}" y="${cy + 51}" text-anchor="middle" style="font-size:9px">chip ${i * 4 + c}</text>`;
+    }
+    out += `<text x="${x + hw / 2}" y="${y0 + 166}" text-anchor="middle" style="font-size:10px">${noV ? (i === 0 ? "no vLLM (origin)" : "no vLLM (crash)") : "vLLM copy, TP 4"}</text>`;
+  }
+  out += `<rect x="${x0}" y="222" width="12" height="9" rx="2" fill="${css("--c-trainer")}"/><text x="${x0 + 18}" y="231">trainer slice (1/32)</text>`;
+  out += `<rect x="${x0 + 170}" y="222" width="12" height="9" rx="2" fill="${css("--c-vllm")}"/><text x="${x0 + 188}" y="231">vLLM weights (1/4) + KV cache</text>`;
+  g.innerHTML = out;
+}
+
+function consts() {
+  const rows = [
+    ["vLLM weights", "inside the line", "params × 2 B ÷ 4", (m) => m.P * 2 / GIB / 4],
+    ["One trainer copy", "inside the line", "params × 2 B ÷ 32 (×1 LoRA GRPO, ×2 LoRA PPO or full GRPO, ×3 full PPO)", (m) => m.P * 2 / GIB / 32],
+    ["vLLM overhead", "inside the line", "fitted", (m) => m.oin],
+    ["KV cache, per 1k tokens", "inside the line", "2 × layers × 8 KV heads × 128 × 2 B ÷ 4", (m) => m.kv * 1000 / 4 / 1024 / 1024],
+    ["Fixed overhead", "above the line", "fitted (vLLM runtime, sync buffers)", (m) => m.oout],
+    ["Activations, per 1k tokens of sequence", "above", "hidden × layers × 2 B per sequence per FSDP group", (m) => m.h * m.L * 2 * 1000 / GIB],
+    ["Logits, per 1k rows", "above", "vocab × 4 B (fp32) × 2 ÷ TP 4, fitted 0.22; rows = chunk size, or completion cap unchunked", () => LOGIT],
+    ["Optimizer + grads (full FT)", "above", "~12 B per trained parameter ÷ 32 (×2 for PPO's critic)", (m) => OPT_B * m.P / 32 / GIB],
+  ];
+  $("consts").innerHTML = rows.map(([n, w, f, fn]) => `<tr><td>${n}</td><td>${w}</td><td class="muted">${f}</td>${["4B", "8B", "14B"].map(k => `<td class="num mono">${fmt(fn(MODELS[k]))}</td>`).join("")}</tr>`).join("");
+}
+
+function calibration() {
+  const C = [
+    ["4B","grpo","lora",49152,1024,1,0.3,"fit"], ["4B","grpo","lora",40960,2048,1,0.3,"fit"], ["4B","grpo","lora",32768,4096,1,0.3,"fit"],
+    ["4B","grpo","lora",24576,0,1,0.3,"OOM"], ["4B","grpo","lora",65536,512,1,0.3,"OOM"], ["4B","grpo","full",32768,1024,1,0.3,"fit"],
+    ["4B","grpo","lora",32768,1024,1,0.3,"fit"], ["4B","ppo","lora",32768,1024,1,0.35,"fit"], ["4B","grpo","full",32768,1024,1,0.35,"fit"],
+    ["4B","ppo","full",16384,1024,1,0.45,"fit"], ["4B","ppo","full",32768,1024,1,0.45,"OOM"],
+    ["8B","grpo","lora",16384,1024,1,0.42,"fit"], ["8B","grpo","lora",32768,1024,1,0.42,"OOM"], ["8B","ppo","lora",16384,1024,1,0.48,"fit"],
+    ["8B","ppo","lora",32768,1024,1,0.48,"OOM"], ["8B","grpo","full",8192,1024,1,0.47,"fit"], ["8B","grpo","full",16384,1024,1,0.47,"OOM"],
+    ["8B","ppo","full",4096,1024,1,0.43,"fit"], ["8B","ppo","full",8192,1024,1,0.43,"OOM"], ["8B","ppo","full",4096,1024,1,0.62,"OOM"],
+    ["14B","grpo","lora",4096,1024,1,0.6,"fit"], ["14B","grpo","lora",8192,1024,1,0.6,"OOM"], ["14B","ppo","lora",4096,1024,1,0.65,"fit"],
+    ["14B","ppo","lora",8192,1024,1,0.65,"OOM"], ["14B","grpo","full",4096,1024,1,0.68,"OOM"], ["14B","ppo","full",4096,1024,1,0.74,"OOM"],
+    ["4B","grpo","lora",1024,0,4,0.4,"fit"], ["4B","ppo","lora",1024,0,4,0.4,"fit"], ["4B","ppo","lora",3072,1024,4,0.4,"fit", 512],
+  ];
+  $("cal").innerHTML = C.map(([mo, al, md, cap, ch, mi, sh, meas, pr]) => {
+    const r = model({ model: mo, algo: al, mode: md, cap, chunk: ch, micro: mi, share: sh, prompt: pr || 768, group: 8, batch: 16 });
+    const pred = r.ok ? "fit" : "OOM";
+    const cls = (x) => x === "fit" ? "yes" : "no";
+    return `<tr><td>${mo}</td><td>${al.toUpperCase()} ${md === "lora" ? "LoRA" : "full"}</td><td class="num">${kfmt(cap)}</td><td class="num">${ch || "none"}</td><td class="num">${mi}</td><td class="num">${sh.toFixed(2)}</td><td class="num">${fmt(r.need)}</td><td class="num">${fmt(r.room)}</td><td class="${cls(pred)}">${pred}</td><td class="${cls(meas)}">${meas}${pred === meas ? "" : " ✗"}</td></tr>`;
+  }).join("");
+}
+
+for (const id of ["model", "algo", "mode"]) {
+  $(id).addEventListener("click", (e) => {
+    const b = e.target.closest("button"); if (!b) return;
+    state[id] = b.dataset.v;
+    for (const x of $(id).querySelectorAll("button")) x.setAttribute("aria-pressed", String(x === b));
+    render();
+  });
+}
+for (const id of ["cap", "prompt", "chunk", "micro", "share", "batch", "group"]) $(id).addEventListener("input", render);
+$("autoshare").addEventListener("click", () => { $("share").value = recommendShare(cfg()).toFixed(2); render(); });
+window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { hosts(); render(); });
+new MutationObserver(() => { hosts(); render(); }).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+hosts(); consts(); calibration(); render();
+</script>
+</body>
+</html>
