@@ -11,7 +11,7 @@
 #   TRAIN_MICRO=auto LOGPS_MICRO=1 ROLLOUT_MICRO=16   (micro-batches, in prompts)   OFFLOAD=false FORCE_FULL=0
 #   LOGPS_CHUNK=auto REMAT=3 PREFIX_CACHE=true XLA_OPT=1 BETA= LR= CRITIC_LR= WARMUP=1 DATA=polaris|math|countdown
 #   EVAL_SETS=math500:4:3072,... EVAL_EVERY=25 (tools/rl_eval.py) VLLM_MAX_LEN=0 TIS=0 TIS_CAP=2.0
-#   HER=0 HER_GOALS=1 HER_COEF=1.0 (Countdown hindsight relabeling, tools/hindsight.py) COUNTDOWN_TARGETS=10-100
+#   HER=0 HER_GOALS=1 HER_COEF=1.0 HER_SOURCE=answer|trajectory (Countdown hindsight relabeling, tools/hindsight.py) COUNTDOWN_TARGETS=10-100
 # Storage: HF weights -> worker-local $SCRATCH; checkpoints/tensorboard -> $CKPT_ROOT/tunix/$RUN_NAME[/w-N] (GCS);
 # metrics -> wandb + $LOG_ROOT/$RUN_NAME/eff[-w-N].jsonl (NFS).
 set -euo pipefail
@@ -55,8 +55,8 @@ VLLM_MAX_BATCHED=$(pick VLLM_MAX_BATCHED 8192)   # tokens per vLLM forward (boun
 # makes training 2.7x (GRPO) to 3.3x (PPO) faster.
 SEQ_LEN=$(( $(pick MAX_PROMPT 768) + $(pick MAX_TOKENS 1024) ))
 # HER=1: every group trains with HER_GOALS relabeled copies (tools/hindsight.py), so micro-steps hold more rows
-HER=$(pick HER 0); HER_GOALS=$(pick HER_GOALS 1); HER_COEF=$(pick HER_COEF 1.0)
-export HER HER_GOALS HER_COEF
+HER=$(pick HER 0); HER_GOALS=$(pick HER_GOALS 1); HER_COEF=$(pick HER_COEF 1.0); HER_SOURCE=$(pick HER_SOURCE answer)
+export HER HER_GOALS HER_COEF HER_SOURCE
 ROWS_PER_PROMPT=$(( $(pick GROUP 8) * (HER == 1 ? 1 + HER_GOALS : 1) ))
 MICRO_BUDGET=$(pick MICRO_BUDGET 65536)
 auto_micro=1

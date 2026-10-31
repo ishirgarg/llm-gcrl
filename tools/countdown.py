@@ -105,17 +105,23 @@ def _evaluate(node, used):
 
 def achieved(goal, completion):
   """The integer the completion's answer evaluates to, if it is a valid expression over exactly goal.numbers."""
-  expr = answer_expression(completion)
+  return value(goal, answer_expression(completion))
+
+
+def value(goal, expr):
+  """The integer value of expression text over exactly goal.numbers (None if invalid or not an integer)."""
   if not expr or len(expr) > 200:
     return None
+  for s, r in _SYMBOLS.items():
+    expr = expr.replace(s, r)
   used = []
   try:
-    value = _evaluate(ast.parse(expr, mode="eval").body, used)
+    exact = _evaluate(ast.parse(expr.strip(), mode="eval").body, used)
   except (SyntaxError, ValueError, ZeroDivisionError, RecursionError):
     return None
-  if sorted(used) != sorted(goal.numbers) or value.denominator != 1:
+  if sorted(used) != sorted(goal.numbers) or exact.denominator != 1:
     return None
-  return int(value)
+  return int(exact)
 
 
 def reward(goal, completion):
