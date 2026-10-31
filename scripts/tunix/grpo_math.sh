@@ -94,6 +94,8 @@ export CRITIC_MICRO
 TIS=$(pick TIS $HER); TIS_CAP=$(pick TIS_CAP 2.0)
 if [ "$HER" = 1 ] && [ "$TIS" != 1 ]; then echo "HER=1 needs TIS=1" >&2; exit 1; fi
 export TIS TIS_CAP
+OVERLONG_FILTER=$(pick OVERLONG_FILTER 0)   # 1 (GRPO): truncated rollouts get no gradient (DAPO), tools/tunix_run.py
+export OVERLONG_FILTER
 VLLM_MAX_LEN=$(pick VLLM_MAX_LEN 0)  # >0: vLLM max_model_len (for evaluation longer than training rollouts)
 export VLLM_MAX_LEN
 MODEL_NAME=$(echo "${MODEL#*/}" | tr 'A-Z' 'a-z')   # Qwen/Qwen3-4B -> qwen3-4b (Tunix model name)

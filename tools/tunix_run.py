@@ -150,6 +150,29 @@ else:
 
     _algo_core_e.common = _NoEntropyCommon()
 
+if os.environ.get("OVERLONG_FILTER") == "1" and os.environ.get("TUNIX_ALGO", "grpo") == "grpo":
+  # DAPO overlong filtering: a rollout cut off at the completion cap (no EOS) is excluded from the policy loss
+  # (advantage 0) instead of counting as a failure. With group advantages and a per-sequence token-sum loss, every
+  # truncated failure pushes down thousands of reasoning tokens, which steadily shortens the reasoning until the
+  # policy answers before it has found a solution (seen on Countdown: GRPO accuracy falls once truncation drops).
+  import numpy as _np_ol  # pylint: disable=g-import-not-at-top
+  import dataclasses as _dc_ol  # pylint: disable=g-import-not-at-top
+  from tunix.rl import rl_cluster as _rc_ol  # pylint: disable=g-import-not-at-top
+  from tunix.rl.grpo import grpo_learner as _gl_ol  # pylint: disable=g-import-not-at-top
+  _orig_gen_adv_ol = _gl_ol.GRPOLearner._generate_and_compute_advantage  # pylint: disable=protected-access
+
+  def _gen_adv_overlong(self, training_input, mode=_rc_ol.Mode.TRAIN):
+    example = _orig_gen_adv_ol(self, training_input, mode)
+    if mode != _rc_ol.Mode.TRAIN:
+      return example
+    truncated = ~(_np_ol.asarray(example.completion_ids) == self.rl_engine.rollout.eos_id()).any(axis=1)
+    advantages = _np_ol.asarray(example.advantages).copy()
+    advantages[truncated] = 0.0
+    self.rl_engine.buffer_metrics({"overlong/frac_truncated": (float(truncated.mean()), _np_ol.mean)}, mode=mode)
+    return _dc_ol.replace(example, advantages=jax.numpy.asarray(advantages))
+
+  _gl_ol.GRPOLearner._generate_and_compute_advantage = _gen_adv_overlong  # pylint: disable=protected-access
+
 if os.environ.get("HER") == "1":
   # Goal-conditioned GRPO with hindsight relabeling on Countdown (tools/hindsight.py): each group also trains on
   # copies relabeled to the values its wrong answers reached, importance-corrected by the TIS weights.
