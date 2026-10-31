@@ -57,7 +57,8 @@ def _load_sets():
   if _sets is None:
     _sets = []
     for spec in os.environ["EVAL_SETS"].split(","):
-      name, k, cap = (spec.split(":") + ["1", "0"])[:3]
+      name, *rest = spec.split(":")
+      k, cap = (rest + ["1", "0"][len(rest):])[:2]  # defaults: 1 sample, the training cap
       _sets.append((name, int(k), int(cap), _task().eval_set(name)))
   return _sets
 
