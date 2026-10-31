@@ -19,6 +19,8 @@ usable value (every answer right, or none valid) gets zero advantages (it keeps 
 
   HER_GOALS=1         relabeled copies per group (the training batch grows (1 + HER_GOALS)x; rollouts do not)
   HER_COEF=1.0        weight of the relabeled rows' advantages
+  HER_MAX_ACC=1.0     relabel only groups whose real success rate is at most this (relabeling teaches "commit to
+                      an answer"; in groups that already succeed that mostly rewards giving up early)
   HER_SOURCE=answer   where relabeled goals come from: "answer" = values of wrong final answers only;
                       "trajectory" = also complete attempts in the reasoning ("E = v", E over all four numbers,
                       v correct): the source rollout is cut right after the attempt and answered with E, so a
@@ -46,6 +48,7 @@ from tunix.rl.grpo import grpo_learner
 GOALS = int(os.environ.get("HER_GOALS", "1"))
 COEF = float(os.environ.get("HER_COEF", "1.0"))
 SOURCE = os.environ.get("HER_SOURCE", "answer")
+MAX_ACC = float(os.environ.get("HER_MAX_ACC", "1.0"))
 
 
 # A complete attempt in the reasoning: "<expression> = <integer>".
@@ -151,7 +154,9 @@ def _augment(learner, training_input, out):
     real_prompt, real_tokens = prompts[rows[0]], out.left_padded_prompt_tokens[rows[0]]
     add(rows, real_prompt, real_tokens, goal.target, 0)
     copies = 0
-    for v, i, cut, expr in _candidates(goal, group_texts, random.Random(seed)):
+    group_acc = np.mean([countdown.reward(goal, t) for t in group_texts])
+    candidates = _candidates(goal, group_texts, random.Random(seed)) if group_acc <= MAX_ACC else []
+    for v, i, cut, expr in candidates:
       if copies == GOALS:
         break
       rewrites = None

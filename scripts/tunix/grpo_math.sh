@@ -56,7 +56,8 @@ VLLM_MAX_BATCHED=$(pick VLLM_MAX_BATCHED 8192)   # tokens per vLLM forward (boun
 SEQ_LEN=$(( $(pick MAX_PROMPT 768) + $(pick MAX_TOKENS 1024) ))
 # HER=1: every group trains with HER_GOALS relabeled copies (tools/hindsight.py), so micro-steps hold more rows
 HER=$(pick HER 0); HER_GOALS=$(pick HER_GOALS 1); HER_COEF=$(pick HER_COEF 1.0); HER_SOURCE=$(pick HER_SOURCE answer)
-export HER HER_GOALS HER_COEF HER_SOURCE
+HER_MAX_ACC=$(pick HER_MAX_ACC 1.0)
+export HER HER_GOALS HER_COEF HER_SOURCE HER_MAX_ACC
 ROWS_PER_PROMPT=$(( $(pick GROUP 8) * (HER == 1 ? 1 + HER_GOALS : 1) ))
 MICRO_BUDGET=$(pick MICRO_BUDGET 65536)
 auto_micro=1
