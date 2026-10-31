@@ -30,6 +30,7 @@ import random
 
 import countdown
 import jax
+from jax.experimental import multihost_utils
 import jax.numpy as jnp
 import numpy as np
 from tunix.rl import rl_cluster
@@ -104,7 +105,16 @@ def _augment(learner, training_input, out):
       left_padded_prompt_tokens=np.stack(prompt_tokens), logits=None, routed_experts=None)
 
 
+def _host(x):
+  """Numpy copy of a (possibly multi-host sharded) array; a collective, so every process must call it."""
+  if isinstance(x, jax.Array) and not x.is_fully_addressable:
+    return np.asarray(multihost_utils.process_allgather(x, tiled=True))
+  return np.asarray(x)
+
+
 def _log_stats(learner, example, training_input):
+  weights = None if example.sampler_is_weights is None else _host(example.sampler_is_weights)
+  mask = _host(example.completion_mask).astype(np.float32)
   if jax.process_index() != 0 or not os.environ.get("RUN_NAME"):
     return
   g = learner.algo_config.num_generations
@@ -118,11 +128,10 @@ def _log_stats(learner, example, training_input):
          "real_all_fail": float((real == 0).mean()), "real_all_win": float((real == g).mean()),
          "relabeled_groups": int(len(relab)), "relabeled_per_group": float(len(relab) / max(len(real), 1)),
          "relabeled_wins_mean": float(relab.mean()) if len(relab) else 0.0}
-  if example.sampler_is_weights is not None:
-    w, m = np.asarray(example.sampler_is_weights), np.asarray(example.completion_mask).astype(np.float32)
+  if weights is not None:
     for name, sel in (("real", kind == 0), ("relabeled", kind == 1)):
       if sel.any():
-        rec[f"is_weight_{name}"] = float((w[sel] * m[sel]).sum() / max(m[sel].sum(), 1.0))
+        rec[f"is_weight_{name}"] = float((weights[sel] * mask[sel]).sum() / max(mask[sel].sum(), 1.0))
   with open(os.path.join(os.environ["LOG_ROOT"], os.environ["RUN_NAME"], "hindsight.jsonl"), "a") as f:
     f.write(json.dumps(rec) + "\n")
 
@@ -148,7 +157,7 @@ def install():
       del engine.generate
     kind = self._her_kind  # pylint: disable=protected-access
     scale = np.where(kind == 0, 1.0, np.where(kind == 1, COEF, 0.0)).astype(np.float32)
-    advantages = np.asarray(example.advantages)
+    advantages = _host(example.advantages)
     advantages = advantages * (scale if advantages.ndim == 1 else scale[:, None])
     example = dataclasses.replace(example, advantages=jnp.asarray(advantages))
     _log_stats(self, example, training_input)
