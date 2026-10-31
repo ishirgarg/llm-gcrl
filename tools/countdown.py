@@ -190,7 +190,7 @@ def create_dataset(model_id=None, seed=0, size=None):
 
 
 def eval_set(name, model_id=None):
-  """[(prompt, answer)] for 256 held-out goals (a seed disjoint from training):
+  """[(prompt, answer)] for 256 held-out goals (a seed disjoint from training; "<name>@<n>" takes the first n):
 
     countdown                  the training distribution (COUNTDOWN_TARGETS, COUNTDOWN_MAX_SOLUTIONS)
     countdown_<lo>_<hi>        targets in [lo, hi], any number of solutions
@@ -198,13 +198,15 @@ def eval_set(name, model_id=None):
 
   The answer string is the encoded goal ("3 7 25 50|123").
   """
+  name, _, size = name.partition("@")  # "countdown@128": the first 128 goals (long-reasoning runs evaluate fewer)
+  n = int(size or 256)
   parts = name.split("_")
   if len(parts) == 1:
-    goals = _goals(256, "countdown-eval", max_sol=max_solutions())
+    goals = _goals(n, "countdown-eval", max_sol=max_solutions())
   else:
     hard = parts[1] == "hard"
     lo, hi = int(parts[-2]), int(parts[-1])
-    goals = _goals(256, "countdown-eval", (lo, hi), max_sol=1 if hard else None)
+    goals = _goals(n, "countdown-eval", (lo, hi), max_sol=1 if hard else None)
   return [(prompt(g, model_id), f"{g.encode()['numbers']}|{g.target}") for g in goals]
 
 
