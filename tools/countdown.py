@@ -9,6 +9,9 @@ A goal is just (numbers, target), so any goal can be proposed and scored:
   reward(goal, completion)             1.0 if achieved == target, else 0.0
   Goal(goal.numbers, achieved(...))    hindsight relabeling: a wrong but valid answer solves the goal it reached
 
+The prompt asks for the closest expression when the target is out of reach, so (almost) every rollout reaches some
+goal that hindsight relabeling can use; the reward is still exact-match only.
+
 Tunix data module: create_dataset() yields training goals; eval_set(name) gives held-out goals for tools/rl_eval.py.
 Goals are generated from seeds (no download): random numbers, combined in a random order with random operations
 whose intermediate results stay positive integers, so every target is reachable. COUNTDOWN_TARGETS="lo-hi" sets
@@ -49,7 +52,8 @@ class Goal:
 USER_TEMPLATE = (
     "Using the numbers {numbers}, create an equation that equals {target}. You can use +, -, *, / and "
     "parentheses, and each number must be used exactly once. Think step by step, then write only the final "
-    "expression (without \"= {target}\") inside <answer> </answer> tags, for example <answer>(1 + 2) * 3 - 4</answer>."
+    "expression (without \"= {target}\") inside <answer> </answer> tags, for example <answer>(1 + 2) * 3 - 4</answer>. "
+    "If you cannot reach {target} exactly, answer with the closest expression you found."
 )
 
 
@@ -69,7 +73,7 @@ def prompt(goal, model_id=None):
 
 # ----------------------------------------------------------------------------------------------- scoring
 
-_ANSWER = re.compile(r"<answer>(.*?)</answer>", re.DOTALL)
+_ANSWER = re.compile(r"answer>(.*?)</answer>", re.DOTALL)  # also "<|im_start|>answer>", a frequent slip
 _SYMBOLS = {"×": "*", "\\times": "*", "·": "*", "÷": "/", "\\div": "/", "−": "-", "–": "-", "\\left": "", "\\right": ""}
 _OPS = {ast.Add: lambda a, b: a + b, ast.Sub: lambda a, b: a - b, ast.Mult: lambda a, b: a * b,
         ast.Div: lambda a, b: a / b}
