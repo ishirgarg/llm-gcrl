@@ -82,7 +82,8 @@ CRITIC_LR=$(pick CRITIC_LR "")
 WARMUP=$(pick WARMUP 1)
 DATA=$(pick DATA polaris)            # polaris (POLARIS-53K) | math (MATH L3-5 train, tools/math_data.py) | countdown
 export DATA                          # tools/rl_eval.py picks its evaluation sets by it
-COUNTDOWN_TARGETS=$(pick COUNTDOWN_TARGETS 10-100); export COUNTDOWN_TARGETS
+COUNTDOWN_TARGETS=$(pick COUNTDOWN_TARGETS 10-100); COUNTDOWN_MAX_SOLUTIONS=$(pick COUNTDOWN_MAX_SOLUTIONS 0)
+export COUNTDOWN_TARGETS COUNTDOWN_MAX_SOLUTIONS
 SAMPLING_KWARGS=$(pick SAMPLING_KWARGS "")   # extra vLLM SamplingParams, python dict body, e.g. 'stop_token_ids': [151645]
 CRITIC_MICRO=${CRITIC_MICRO:-$((TRAIN_MICRO * GROUP))}   # PPO value pass: sequences per slice
 export CRITIC_MICRO

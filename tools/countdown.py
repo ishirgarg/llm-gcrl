@@ -15,7 +15,8 @@ goal that hindsight relabeling can use; the reward is still exact-match only.
 Tunix data module: create_dataset() yields training goals; eval_set(name) gives held-out goals for tools/rl_eval.py.
 Goals are generated from seeds (no download): random numbers, combined in a random order with random operations
 whose intermediate results stay positive integers, so every target is reachable. COUNTDOWN_TARGETS="lo-hi" sets
-the target range (default 10-100, as in TinyZero's Countdown-Tasks).
+the target range (default 10-100, as in TinyZero's Countdown-Tasks); COUNTDOWN_MAX_SOLUTIONS=n keeps only goals with
+at most n solution paths (n_solutions, an exhaustive search), the knob for sparse rewards.
 """
 import ast
 import dataclasses
@@ -130,8 +131,34 @@ def reward(goal, completion):
 
 # ----------------------------------------------------------------------------------------------- goals
 
-def sample_goal(rng, targets=None):
-  """Random reachable goal: combine N_NUMBERS random numbers pairwise with random valid operations."""
+def _count_paths(numbers, target):
+  """Computation paths combining every number exactly once that reach target (float arithmetic, 1e-6 tolerance;
+  a+b and a*b counted once per pair, a-b / b-a and a/b / b/a separately)."""
+  if len(numbers) == 1:
+    return int(abs(numbers[0] - target) < 1e-6)
+  count = 0
+  for i in range(len(numbers)):
+    for j in range(i + 1, len(numbers)):
+      a, b = numbers[i], numbers[j]
+      rest = numbers[:i] + numbers[i + 1:j] + numbers[j + 1:]
+      for r in [a + b, a * b, a - b, b - a] + ([a / b] if b else []) + ([b / a] if a else []):
+        count += _count_paths(rest + (r,), target)
+  return count
+
+
+def n_solutions(goal):
+  """Number of distinct computation paths that reach the target (1 = a unique solution: the hardest goals)."""
+  return _count_paths(tuple(float(x) for x in goal.numbers), float(goal.target))
+
+
+def max_solutions():
+  """COUNTDOWN_MAX_SOLUTIONS=n keeps only goals with at most n solution paths (default: no limit)."""
+  return int(os.environ.get("COUNTDOWN_MAX_SOLUTIONS", "0")) or None
+
+
+def sample_goal(rng, targets=None, max_sol=None):
+  """Random reachable goal: combine N_NUMBERS random numbers pairwise with random valid operations, optionally
+  rejecting goals with more than max_sol solution paths."""
   lo, hi = targets or target_range()
   while True:
     numbers = [rng.randint(*NUMBER_RANGE) for _ in range(N_NUMBERS)]
@@ -143,30 +170,41 @@ def sample_goal(rng, targets=None):
       results = [a + b, a * b] + ([a - b] if a > b else []) + ([a // b] if b > 1 and a % b == 0 else [])
       pool.append(rng.choice(results))
     if lo <= pool[0] <= hi:
-      return Goal(tuple(numbers), pool[0])
+      goal = Goal(tuple(numbers), pool[0])
+      if max_sol is None or n_solutions(goal) <= max_sol:
+        return goal
 
 
-def _goals(n, seed, targets=None):
+def _goals(n, seed, targets=None, max_sol=None):
   rng = random.Random(seed)  # string seeds hash deterministically, so every host builds the same goals
-  return [sample_goal(rng, targets) for _ in range(n)]
+  return [sample_goal(rng, targets, max_sol) for _ in range(n)]
 
 
-def create_dataset(model_id=None, seed=0, size=20_000):
+def create_dataset(model_id=None, seed=0, size=None):
   import grain  # pylint: disable=g-import-not-at-top
   seed = int(os.environ.get("DATA_SEED", seed))
-  goals = _goals(size, f"countdown-train-{seed}")
+  size = size or (4_000 if max_solutions() else 20_000)  # solution counting makes hard goals slower to generate
+  goals = _goals(size, f"countdown-train-{seed}", max_sol=max_solutions())
   rows = [{"prompts": prompt(g, model_id), **g.encode()} for g in goals]
   return grain.MapDataset.source(rows)
 
 
 def eval_set(name, model_id=None):
-  """[(prompt, answer)] for 'countdown' (training target range) or 'countdown_<lo>_<hi>' (another range).
+  """[(prompt, answer)] for 256 held-out goals (a seed disjoint from training):
 
-  256 goals from a seed disjoint from training. The answer string is the encoded goal ("3 7 25 50|123").
+    countdown                  the training distribution (COUNTDOWN_TARGETS, COUNTDOWN_MAX_SOLUTIONS)
+    countdown_<lo>_<hi>        targets in [lo, hi], any number of solutions
+    countdown_hard_<lo>_<hi>   targets in [lo, hi] with a unique solution path
+
+  The answer string is the encoded goal ("3 7 25 50|123").
   """
   parts = name.split("_")
-  targets = (int(parts[1]), int(parts[2])) if len(parts) == 3 else None
-  goals = _goals(256, "countdown-eval", targets)
+  if len(parts) == 1:
+    goals = _goals(256, "countdown-eval", max_sol=max_solutions())
+  else:
+    hard = parts[1] == "hard"
+    lo, hi = int(parts[-2]), int(parts[-1])
+    goals = _goals(256, "countdown-eval", (lo, hi), max_sol=1 if hard else None)
   return [(prompt(g, model_id), f"{g.encode()['numbers']}|{g.target}") for g in goals]
 
 
