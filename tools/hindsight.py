@@ -26,6 +26,10 @@ usable value (every answer right, or none valid) gets zero advantages (it keeps 
                       v correct): the source rollout is cut right after the attempt and answered with E, so a
                       rollout that never answered (e.g. ran out of tokens) still yields a goal. The analogue of
                       HER's "future" strategy: any state the trajectory passed through is an achieved goal.
+                      "attempts" = reasoning attempts only. Relabeling a wrong final answer rewards committing to a
+                      non-solution ("cannot reach the target, closest is X" is right for goal X only in hindsight),
+                      which pushes the policy to give up early; a rewritten attempt instead teaches "answer when an
+                      attempt equals the goal", which is right under every goal.
 
 Per-step stats go to $LOG_ROOT/$RUN_NAME/hindsight.jsonl (process 0).
 """
@@ -56,7 +60,7 @@ _CLAIM = re.compile(r"([\d(][\d\s()+\-*/×÷−·]*[\d)])\s*=\s*(\d+)")
 
 
 def _candidates(goal, texts, rng):
-  """Relabeling candidates (value, row, cut, expression), shuffled, final answers first.
+  """Relabeling candidates (value, row, cut, expression), shuffled, final answers (unless HER_SOURCE=attempts) first.
 
   Final answers: a valid wrong <answer> reached `value` (cut None: the completion is used as is). With
   HER_SOURCE=trajectory also attempts in the reasoning: a correct "E = value" with E over exactly the goal's
@@ -67,9 +71,9 @@ def _candidates(goal, texts, rng):
   answers, attempts = [], []
   for i, text in enumerate(texts):
     v = countdown.achieved(goal, text)
-    if v is not None:
+    if v is not None and SOURCE != "attempts":
       answers.append((v, i, None, None))
-    if SOURCE == "trajectory":
+    if SOURCE in ("trajectory", "attempts"):
       for m in _CLAIM.finditer(text):
         v = countdown.value(goal, m.group(1))
         if v is not None and v == int(m.group(2)):
