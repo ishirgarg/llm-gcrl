@@ -9,8 +9,9 @@
 #   MODEL=Qwen/Qwen3-4B      HF id (Qwen3 dense or MoE)
 #   MAX_TOKENS=1024 MAX_PROMPT=768 NUM_BATCHES=4 VLLM_HBM=0.4 MESH=1x4 VLLM_MAX_SEQS=128 VLLM_MAX_BATCHED=8192
 #   TRAIN_MICRO=auto LOGPS_MICRO=1 ROLLOUT_MICRO=16   (micro-batches, in prompts)   OFFLOAD=false FORCE_FULL=0
-#   LOGPS_CHUNK=auto REMAT=3 PREFIX_CACHE=true XLA_OPT=1 BETA= LR= CRITIC_LR= WARMUP=1 DATA=polaris|math
+#   LOGPS_CHUNK=auto REMAT=3 PREFIX_CACHE=true XLA_OPT=1 BETA= LR= CRITIC_LR= WARMUP=1 DATA=polaris|math|countdown
 #   EVAL_SETS=math500:4:3072,... EVAL_EVERY=25 (tools/rl_eval.py) VLLM_MAX_LEN=0 TIS=0 TIS_CAP=2.0
+#   HER=0 HER_GOALS=1 HER_COEF=1.0 (Countdown hindsight relabeling, tools/hindsight.py) COUNTDOWN_TARGETS=10-100
 # Storage: HF weights -> worker-local $SCRATCH; checkpoints/tensorboard -> $CKPT_ROOT/tunix/$RUN_NAME[/w-N] (GCS);
 # metrics -> wandb + $LOG_ROOT/$RUN_NAME/eff[-w-N].jsonl (NFS).
 set -euo pipefail
@@ -53,10 +54,14 @@ VLLM_MAX_BATCHED=$(pick VLLM_MAX_BATCHED 8192)   # tokens per vLLM forward (boun
 # a divisor of BATCH. Bigger micro-steps amortise the per-micro-step FSDP weight all-gathers: at 1k, 1 -> 4 prompts
 # makes training 2.7x (GRPO) to 3.3x (PPO) faster.
 SEQ_LEN=$(( $(pick MAX_PROMPT 768) + $(pick MAX_TOKENS 1024) ))
+# HER=1: every group trains with HER_GOALS relabeled copies (tools/hindsight.py), so micro-steps hold more rows
+HER=$(pick HER 0); HER_GOALS=$(pick HER_GOALS 1); HER_COEF=$(pick HER_COEF 1.0)
+export HER HER_GOALS HER_COEF
+ROWS_PER_PROMPT=$(( $(pick GROUP 8) * (HER == 1 ? 1 + HER_GOALS : 1) ))
 MICRO_BUDGET=$(pick MICRO_BUDGET 65536)
 auto_micro=1
 for m in $(seq "$(pick BATCH 16)" -1 1); do
-  if [ $(( $(pick BATCH 16) % m )) -eq 0 ] && [ $(( m * $(pick GROUP 8) * SEQ_LEN )) -le "$MICRO_BUDGET" ]; then auto_micro=$m; break; fi
+  if [ $(( $(pick BATCH 16) % m )) -eq 0 ] && [ $(( m * ROWS_PER_PROMPT * SEQ_LEN )) -le "$MICRO_BUDGET" ]; then auto_micro=$m; break; fi
 done
 TRAIN_MICRO=$(pick TRAIN_MICRO $auto_micro)
 LOGPS_MICRO=$(pick LOGPS_MICRO 1)    # prompts per reference/old-logprob micro-pass
@@ -75,13 +80,17 @@ BETA=$(pick BETA "")                 # KL coefficient override (configs default 
 LR=$(pick LR "")                     # actor peak LR override; CRITIC_LR likewise (constant after WARMUP steps)
 CRITIC_LR=$(pick CRITIC_LR "")
 WARMUP=$(pick WARMUP 1)
-DATA=$(pick DATA polaris)            # polaris (POLARIS-53K) | math (MATH L3-5 train, tools/math_data.py)
+DATA=$(pick DATA polaris)            # polaris (POLARIS-53K) | math (MATH L3-5 train, tools/math_data.py) | countdown
+export DATA                          # tools/rl_eval.py picks its evaluation sets by it
+COUNTDOWN_TARGETS=$(pick COUNTDOWN_TARGETS 10-100); export COUNTDOWN_TARGETS
 SAMPLING_KWARGS=$(pick SAMPLING_KWARGS "")   # extra vLLM SamplingParams, python dict body, e.g. 'stop_token_ids': [151645]
 CRITIC_MICRO=${CRITIC_MICRO:-$((TRAIN_MICRO * GROUP))}   # PPO value pass: sequences per slice
 export CRITIC_MICRO
 # 1: correct the vLLM-vs-trainer log-prob mismatch with truncated importance sampling, w = min(pi_trainer/pi_vllm,
-# TIS_CAP) per token (tools/tunix_run.py). Costs one trainer log-prob pass per step.
-TIS=$(pick TIS 0); TIS_CAP=$(pick TIS_CAP 2.0)
+# TIS_CAP) per token (tools/tunix_run.py). Costs one trainer log-prob pass per step. HER needs it: the same weights
+# correct relabeled rows for the change of goal.
+TIS=$(pick TIS $HER); TIS_CAP=$(pick TIS_CAP 2.0)
+if [ "$HER" = 1 ] && [ "$TIS" != 1 ]; then echo "HER=1 needs TIS=1" >&2; exit 1; fi
 export TIS TIS_CAP
 VLLM_MAX_LEN=$(pick VLLM_MAX_LEN 0)  # >0: vLLM max_model_len (for evaluation longer than training rollouts)
 export VLLM_MAX_LEN
@@ -108,7 +117,7 @@ if [ "$XLA_OPT" = 1 ]; then
 --xla_tpu_overlap_compute_collective_tc=true --xla_enable_async_all_gather=true \
 --xla_tpu_enable_data_parallel_all_reduce_opt=true --xla_tpu_data_parallel_opt_different_sized_ops=true"
 fi
-echo "worker=$WORKER algo=$ALGO host_mode=$HOST_MODE mode=$MODE model=$MODEL mesh=$MESH max_tokens=$MAX_TOKENS vllm_hbm=$VLLM_HBM logps_chunk=$LOGPS_CHUNK offload=$OFFLOAD remat=$REMAT prefix_cache=$PREFIX_CACHE xla_opt=$XLA_OPT train_micro=$TRAIN_MICRO data=$DATA"
+echo "worker=$WORKER algo=$ALGO host_mode=$HOST_MODE mode=$MODE model=$MODEL mesh=$MESH max_tokens=$MAX_TOKENS vllm_hbm=$VLLM_HBM logps_chunk=$LOGPS_CHUNK offload=$OFFLOAD remat=$REMAT prefix_cache=$PREFIX_CACHE xla_opt=$XLA_OPT train_micro=$TRAIN_MICRO data=$DATA her=$HER tis=$TIS"
 # Fresh metrics for this launch (a crashed earlier attempt under the same run name must not leak in).
 if [ "$HOST_MODE" = single ]; then rm -f "$LOG_ROOT/$RUN_NAME/eff-$WORKER.jsonl"
 elif [ "$WORKER_ID" = 0 ]; then rm -f "$LOG_ROOT/$RUN_NAME/eff.jsonl"; fi
@@ -148,8 +157,9 @@ if [ "$TIS" = 1 ]; then
     OPT_ARGS+=(grpo_config.use_rollout_logps=true grpo_config.sampler_is=token grpo_config.sampler_is_threshold="$TIS_CAP")
   fi
 fi
-DATA_MODULE=polaris_data
+DATA_MODULE=polaris_data; REWARD=math_reward
 if [ "$DATA" = math ]; then DATA_MODULE=math_data; fi
+if [ "$DATA" = countdown ]; then DATA_MODULE=countdown; REWARD=countdown_reward; fi
 
 source "$NFS_ROOT/venvs/maxtext/bin/activate"
 TUNIX_SRC=$NFS_ROOT/third_party/tunix      # same commit as the installed package; only used for base_config.yaml
@@ -173,7 +183,7 @@ fi
 TUNIX_ALGO=$ALGO python3 "$REPO/tools/tunix_run.py" \
   "$TUNIX_SRC/tunix/cli/base_config.yaml" \
   override_config_file="$REPO/configs/tunix/${ALGO}_qwen3_polaris.yaml" \
-  "reward_functions=[$REPO/tools/math_reward.py]" \
+  "reward_functions=[$REPO/tools/$REWARD.py]" \
   model_config.model_name="$MODEL_NAME" \
   model_config.model_id="$MODEL" \
   model_config.model_download_path="$MODEL_DIR" \

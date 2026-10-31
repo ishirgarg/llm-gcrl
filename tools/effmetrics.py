@@ -19,6 +19,7 @@ QWEN3_4B_PARAMS = 4.02e9
 MODEL_PARAMS = {
     "Qwen/Qwen3-1.7B": 2.03e9,
     "Qwen/Qwen3-4B": QWEN3_4B_PARAMS,
+    "Qwen/Qwen3-4B-Instruct-2507": QWEN3_4B_PARAMS,
     "Qwen/Qwen3-8B": 8.19e9,
     "Qwen/Qwen3-14B": 14.77e9,
     "Qwen/Qwen3-30B-A3B": 3.35e9,

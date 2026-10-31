@@ -150,6 +150,14 @@ else:
 
     _algo_core_e.common = _NoEntropyCommon()
 
+if os.environ.get("HER") == "1":
+  # Goal-conditioned GRPO with hindsight relabeling on Countdown (tools/hindsight.py): each group also trains on
+  # copies relabeled to the values its wrong answers reached, importance-corrected by the TIS weights.
+  if os.environ.get("TUNIX_ALGO", "grpo") != "grpo":
+    raise ValueError("HER=1 needs TUNIX_ALGO=grpo")
+  import hindsight  # pylint: disable=g-import-not-at-top
+  hindsight.install()
+
 if os.environ.get("LEN_SCHEDULE"):
   # Profiling several completion caps in one job (the model loads once): LEN_SCHEDULE="4096:2,8192:2" runs 2 RL
   # steps at a 4096-token cap, then 2 at 8192, ... The launcher sets MAX_TOKENS to the largest cap (vLLM

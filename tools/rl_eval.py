@@ -1,10 +1,12 @@
 """Evaluation inside a Tunix RL run, sampled through the run's own vLLM rollout engine (= current policy weights).
 
-  EVAL_SETS="math500:4:3072,amc23:8:8192"  sets (tools/math_data.py), samples per problem, optional completion cap
+  EVAL_SETS="math500:4:3072,amc23:8:8192"  sets, samples per problem, optional completion cap; the sets come from
+                                           tools/countdown.py when DATA=countdown, else tools/math_data.py
   EVAL_EVERY=25                            before training, every N policy updates, and after the last one
   EVAL_TEMPERATURE / EVAL_TOP_P            sampling for evaluation (default: the training rollout's)
 
-Per set: accuracy (mean over all samples, = avg@k), pass@k, \\boxed{} rate and mean completion length, appended
+Per set: accuracy (mean over all samples, = avg@k), pass@k, answer-format rate (\\boxed{} / <answer>) and mean
+completion length, appended
 to $LOG_ROOT/$RUN_NAME/eval.jsonl by process 0 and buffered to the metrics logger as eval/<set>/<metric>.
 Evaluation time is left out of the eff/* step times. install() wraps RLEngine.generate's raw version before
 tunix_eff instruments it, so evaluation generations are not counted as rollouts.
@@ -15,8 +17,6 @@ import os
 import time
 
 import jax
-import math_data
-import math_reward
 import numpy as np
 from tunix.rl import rl_cluster
 
@@ -25,13 +25,40 @@ _sets = None
 _done_steps = set()
 
 
+class _MathTask:
+  """tools/math_data.py sets graded by tools/math_reward.py."""
+
+  def __init__(self):
+    import math_data  # pylint: disable=g-import-not-at-top
+    import math_reward  # pylint: disable=g-import-not-at-top
+    self.eval_set = math_data.eval_set
+    self._reward = math_reward
+
+  def score(self, completion, answer):
+    return self._reward._score(completion, answer)  # pylint: disable=protected-access
+
+  def formatted(self, completion):
+    try:
+      self._reward.grading.extract_boxed(completion)
+      return True
+    except ValueError:
+      return False
+
+
+def _task():
+  if os.environ.get("DATA") == "countdown":
+    import countdown  # pylint: disable=g-import-not-at-top
+    return countdown  # eval_set(name), score(completion, answer), formatted(completion)
+  return _MathTask()
+
+
 def _load_sets():
   global _sets
   if _sets is None:
     _sets = []
     for spec in os.environ["EVAL_SETS"].split(","):
       name, k, cap = (spec.split(":") + ["1", "0"])[:3]
-      _sets.append((name, int(k), int(cap), math_data.eval_set(name)))
+      _sets.append((name, int(k), int(cap), _task().eval_set(name)))
   return _sets
 
 
@@ -58,13 +85,14 @@ def evaluate(engine, step):
       prompts = [p for p, _ in items for _ in range(k)]
       cap = cap or eval_cfg.max_tokens_to_generate  # per-set completion cap (needs VLLM_MAX_LEN >= prompt + cap)
       out = _raw_generate(engine, prompts, micro_batch_size=len(prompts), max_generation_steps=cap)
-      scores = np.array([math_reward._score(c, a) for c, (_, a) in  # pylint: disable=protected-access
+      task = _task()
+      scores = np.array([task.score(c, a) for c, (_, a) in
                          zip(out.text, [it for it in items for _ in range(k)])]).reshape(len(items), k)
       correct = scores == 1.0
       m = {
           "acc": float(correct.mean()),
           f"pass@{k}": float(correct.any(axis=1).mean()),
-          "boxed_rate": float((scores != -math_reward.FORMAT_COEF).mean()),
+          "format_rate": float(np.mean([task.formatted(c) for c in out.text])),
           "mean_len": float(np.mean([len(t) for t in out.tokens])),
           "max_len_frac": float(np.mean([len(t) >= cap for t in out.tokens])),
       }
