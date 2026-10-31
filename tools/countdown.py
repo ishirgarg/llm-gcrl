@@ -82,7 +82,7 @@ _OPS = {ast.Add: lambda a, b: a + b, ast.Sub: lambda a, b: a - b, ast.Mult: lamb
 
 def answer_expression(completion):
   """The expression in the last <answer> tag, without any trailing '= ...' (None if there is no tag)."""
-  found = _ANSWER.findall(completion)
+  found = _ANSWER.findall(completion.split("</think>")[-1])  # thinking models: only the final response counts
   if not found:
     return None
   expr = found[-1]

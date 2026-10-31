@@ -88,8 +88,9 @@ def _candidates(goal, texts, rng):
   return out
 
 
-def _rewrite(engine, tokens, logprobs, text, cut, expr, max_len):
-  """Completion truncated where its text reaches `cut`, then answered: "\\n\\n<answer>expr</answer>" + EOS.
+def _rewrite(engine, tokens, logprobs, text, cut, expr, max_len, close_think=False):
+  """Completion truncated where its text reaches `cut`, then answered: "\\n\\n<answer>expr</answer>" + EOS
+  (with "</think>" first when the cut falls inside a thinking model's reasoning block).
 
   The appended tokens were not sampled, so they get rollout log-prob 0: their TIS weight min(pi_train / 1, cap)
   is the trainer's own probability of them (near 1 for copying the expression it just wrote). None if the
@@ -105,7 +106,8 @@ def _rewrite(engine, tokens, logprobs, text, cut, expr, max_len):
       hi = mid
     else:
       lo = mid + 1
-  suffix = list(tok.encode(f"\n\n<answer>{expr}</answer>")) + [engine.rollout.eos_id()]
+  answer = ("\n</think>\n\n" if close_think else "\n\n") + f"<answer>{expr}</answer>"
+  suffix = list(tok.encode(answer)) + [engine.rollout.eos_id()]
   new = np.concatenate([np.asarray(tokens[:lo], dtype=np.int32), np.asarray(suffix, dtype=np.int32)])
   if len(new) > max_len:
     return None
@@ -133,6 +135,7 @@ def _augment(learner, training_input, out):
   if not np.array_equal(_encode_prompt(engine, prompts[0], width), out.left_padded_prompt_tokens[0]):
     raise RuntimeError("hindsight: re-tokenized prompt differs from the sampler's tokens")
   logprobs = out.logprobs if out.logprobs is not None else [None] * len(out.text)
+  thinking = prompts[0].rstrip().endswith("<think>")  # the chat template opened a reasoning block
 
   src, texts, tokens, lps, new_prompt, new_target, prompt_tokens, kind = [], [], [], [], [], [], [], []
   rewritten = 0  # kind: 0 real, 1 relabeled, 2 unused copy (zero advantage)
@@ -165,7 +168,8 @@ def _augment(learner, training_input, out):
         break
       rewrites = None
       if cut is not None:
-        r = _rewrite(engine, out.tokens[rows[i]], logprobs[rows[i]], group_texts[i], cut, expr, max_len)
+        close_think = thinking and "</think>" not in group_texts[i][:cut]
+        r = _rewrite(engine, out.tokens[rows[i]], logprobs[rows[i]], group_texts[i], cut, expr, max_len, close_think)
         if r is None:
           continue
         rewrites = {rows[i]: (r[2], r[0], r[1])}
