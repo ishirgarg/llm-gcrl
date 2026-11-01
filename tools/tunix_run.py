@@ -355,6 +355,16 @@ if os.environ.get("PACK", "0") == "1":
   _common_pk.aggregate_loss = _with_pack_norm(_common_pk.aggregate_loss)
   _common_pk.reduced_loss_agg = _with_pack_norm(_common_pk.reduced_loss_agg)
 
+  # PPO critic: the packed branch of common.compute_score sends segment_ids but no attention_mask, a required
+  # argument of the Qwen3 call (the actor's log-prob path passes None explicitly). Default it on the score head.
+  _orig_score_call = _rl_utils_pk.TransformerWithScoreHead.__call__
+
+  def _score_call(self, *args, **kwargs):
+    kwargs.setdefault("attention_mask", None)
+    return _orig_score_call(self, *args, **kwargs)
+
+  _rl_utils_pk.TransformerWithScoreHead.__call__ = _score_call
+
 if int(os.environ.get("LOGPS_CHUNK") or 0) > 0:
   # Tunix chunks the actor's logits when compute_logps_chunk_size is set, but its reference-model pass (KL term)
   # ignores it and materialises the full [batch, length, vocab] logits, which is what runs out of HBM first at
