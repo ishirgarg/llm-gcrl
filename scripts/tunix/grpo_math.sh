@@ -95,6 +95,12 @@ export CRITIC_MICRO
 TIS=$(pick TIS $HER); TIS_CAP=$(pick TIS_CAP 2.0)
 if [ "$HER" = 1 ] && [ "$TIS" != 1 ]; then echo "HER=1 needs TIS=1" >&2; exit 1; fi
 export TIS TIS_CAP
+# 1 (default): sequence packing for the training micro-steps: whole sequences packed into rows of PACK_BUDGET
+# tokens (default prompt cap + completion cap, the memory of one padded row) instead of padding every completion
+# to the cap. Changes speed only; losses are per-sequence either way. tools/tunix_run.py fills two Tunix gaps.
+PACK=$(pick PACK 1); PACK_BUDGET=$(pick PACK_BUDGET $(( $(pick MAX_PROMPT 768) + $(pick MAX_TOKENS 1024) )))
+PACK_MAX_SEGMENTS=$(pick PACK_MAX_SEGMENTS 32)
+export PACK
 OVERLONG_FILTER=$(pick OVERLONG_FILTER 0)   # 1 (GRPO): truncated rollouts get no gradient (DAPO), tools/tunix_run.py
 export OVERLONG_FILTER
 VLLM_MAX_LEN=$(pick VLLM_MAX_LEN 0)  # >0: vLLM max_model_len (for evaluation longer than training rollouts)
@@ -122,7 +128,7 @@ if [ "$XLA_OPT" = 1 ]; then
 --xla_tpu_overlap_compute_collective_tc=true --xla_enable_async_all_gather=true \
 --xla_tpu_enable_data_parallel_all_reduce_opt=true --xla_tpu_data_parallel_opt_different_sized_ops=true"
 fi
-echo "worker=$WORKER algo=$ALGO host_mode=$HOST_MODE mode=$MODE model=$MODEL mesh=$MESH max_tokens=$MAX_TOKENS vllm_hbm=$VLLM_HBM logps_chunk=$LOGPS_CHUNK offload=$OFFLOAD remat=$REMAT prefix_cache=$PREFIX_CACHE xla_opt=$XLA_OPT train_micro=$TRAIN_MICRO data=$DATA her=$HER tis=$TIS"
+echo "worker=$WORKER pack=$PACK algo=$ALGO host_mode=$HOST_MODE mode=$MODE model=$MODEL mesh=$MESH max_tokens=$MAX_TOKENS vllm_hbm=$VLLM_HBM logps_chunk=$LOGPS_CHUNK offload=$OFFLOAD remat=$REMAT prefix_cache=$PREFIX_CACHE xla_opt=$XLA_OPT train_micro=$TRAIN_MICRO data=$DATA her=$HER tis=$TIS"
 # Fresh metrics for this launch (a crashed earlier attempt under the same run name must not leak in).
 if [ "$HOST_MODE" = single ]; then rm -f "$LOG_ROOT/$RUN_NAME/eff-$WORKER.jsonl"
 elif [ "$WORKER_ID" = 0 ]; then rm -f "$LOG_ROOT/$RUN_NAME/eff.jsonl"; fi
@@ -160,6 +166,9 @@ if [ -n "$GRAD_CLIP" ]; then
   if [ "$ALGO" = ppo ]; then OPT_ARGS+=(rl_training_config.critic_optimizer_config.max_grad_norm="$GRAD_CLIP"); fi
 fi
 if [ -n "$BETA" ]; then OPT_ARGS+=("${ALGO}_config.beta=$BETA"); fi
+if [ "$PACK" = 1 ]; then
+  OPT_ARGS+=(rl_training_config.max_seq_token_per_tpu="$PACK_BUDGET" rl_training_config.max_segments_per_packed_row="$PACK_MAX_SEGMENTS")
+fi
 if [ "$TIS" = 1 ]; then
   OPT_ARGS+=(rollout_config.return_logprobs=true)
   if [ "$ALGO" = ppo ]; then

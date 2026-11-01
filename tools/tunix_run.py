@@ -293,6 +293,37 @@ if os.environ.get("TIS") == "1":
     import dataclasses as _dc_tis  # pylint: disable=g-import-not-at-top
     ppo_learner.PPOLearner._generate_and_compute_advantage = _gen_adv_tis  # pylint: disable=protected-access
 
+if os.environ.get("PACK", "0") == "1":
+  # Sequence packing (rl_training_config.max_seq_token_per_tpu, set by the launcher): training micro-steps run on
+  # [fsdp rows x budget] chunks of whole sequences instead of every completion padded to the cap. Tunix unpads each
+  # TrainExample first; two gaps for our runs:
+  #   - it drops sampler_is_weights (the TIS correction) although the packer carries the field: put it back;
+  #   - it reads every field with np.asarray, but trainer log-probs / TIS weights are multi-host sharded: gather
+  #     them first (a collective; every process unpads the same examples in the same order).
+  import dataclasses as _dc_pk  # pylint: disable=g-import-not-at-top
+  import numpy as _np_pk  # pylint: disable=g-import-not-at-top
+  from jax.experimental import multihost_utils as _mhu_pk  # pylint: disable=g-import-not-at-top
+  from tunix.rl import utils as _rl_utils_pk  # pylint: disable=g-import-not-at-top
+  _orig_unpad = _rl_utils_pk.unpad_train_example
+
+  def _host_pk(x):
+    if isinstance(x, jax.Array) and not x.is_fully_addressable:
+      return _np_pk.asarray(_mhu_pk.process_allgather(x, tiled=True))
+    return x
+
+  def _unpad_gathered(example):
+    example = _dc_pk.replace(example, **{f.name: _host_pk(getattr(example, f.name))
+                                         for f in _dc_pk.fields(example) if isinstance(getattr(example, f.name), jax.Array)})
+    items = _orig_unpad(example)
+    weights = getattr(example, "sampler_is_weights", None)
+    if weights is not None:
+      weights, mask = _np_pk.asarray(weights), _np_pk.asarray(example.completion_mask)
+      for i, item in enumerate(items):
+        item["sampler_is_weights"] = weights[i, :int(mask[i].sum())]
+    return items
+
+  _rl_utils_pk.unpad_train_example = _unpad_gathered
+
 if int(os.environ.get("LOGPS_CHUNK") or 0) > 0:
   # Tunix chunks the actor's logits when compute_logps_chunk_size is set, but its reference-model pass (KL term)
   # ignores it and materialises the full [batch, length, vocab] logits, which is what runs out of HBM first at
