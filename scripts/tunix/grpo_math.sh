@@ -100,7 +100,8 @@ export TIS TIS_CAP
 # to the cap. Changes speed only; losses are per-sequence either way. tools/tunix_run.py fills two Tunix gaps.
 PACK=$(pick PACK 1); PACK_BUDGET=$(pick PACK_BUDGET $(( $(pick MAX_PROMPT 768) + $(pick MAX_TOKENS 1024) )))
 PACK_MAX_SEGMENTS=$(pick PACK_MAX_SEGMENTS 32)
-export PACK
+PACK_NORM=$(pick MAX_TOKENS 1024)   # Dr. GRPO loss constant under packing (= completion cap, as unpacked)
+export PACK PACK_NORM
 OVERLONG_FILTER=$(pick OVERLONG_FILTER 0)   # 1 (GRPO): truncated rollouts get no gradient (DAPO), tools/tunix_run.py
 export OVERLONG_FILTER
 VLLM_MAX_LEN=$(pick VLLM_MAX_LEN 0)  # >0: vLLM max_model_len (for evaluation longer than training rollouts)

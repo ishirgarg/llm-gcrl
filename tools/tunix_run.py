@@ -337,6 +337,22 @@ if os.environ.get("PACK", "0") == "1":
 
   _rl_utils_pk.jnp = _JnpNoCopyFalse()
 
+  # Dr. GRPO's "sequence-mean-token-scale" divides each sequence's token-loss sum by a constant: unpacked, the row
+  # width = the completion cap. Packed rows are pack-budget wide, so Tunix requires that constant explicitly; give
+  # it the completion cap (PACK_NORM, set by the launcher) so the packed loss equals the unpacked one.
+  from tunix.rl import common as _common_pk  # pylint: disable=g-import-not-at-top
+  _orig_aggregate_loss = _common_pk.aggregate_loss
+  _pack_norm = float(os.environ["PACK_NORM"])
+
+  def _aggregate_loss_packed(per_token_loss, completion_mask, loss_agg_mode, segment_ids=None, num_segments=None,
+                             **kwargs):
+    if segment_ids is not None and loss_agg_mode == "sequence-mean-token-scale":
+      kwargs.setdefault("norm", _pack_norm)
+    return _orig_aggregate_loss(per_token_loss, completion_mask, loss_agg_mode, segment_ids=segment_ids,
+                                num_segments=num_segments, **kwargs)
+
+  _common_pk.aggregate_loss = _aggregate_loss_packed
+
 if int(os.environ.get("LOGPS_CHUNK") or 0) > 0:
   # Tunix chunks the actor's logits when compute_logps_chunk_size is set, but its reference-model pass (KL term)
   # ignores it and materialises the full [batch, length, vocab] logits, which is what runs out of HBM first at
