@@ -9,7 +9,7 @@
 #   MODEL=Qwen/Qwen3-4B      HF id (Qwen3 dense or MoE)
 #   MAX_TOKENS=1024 MAX_PROMPT=768 NUM_BATCHES=4 VLLM_HBM=0.4 MESH=1x4 VLLM_MAX_SEQS=128 VLLM_MAX_BATCHED=8192
 #   TRAIN_MICRO=auto LOGPS_MICRO=1 ROLLOUT_MICRO=16   (micro-batches, in prompts)   OFFLOAD=false FORCE_FULL=0
-#   LOGPS_CHUNK=auto REMAT=3 PREFIX_CACHE=true XLA_OPT=1 BETA= LR= CRITIC_LR= WARMUP=1 DATA=polaris|math|countdown
+#   LOGPS_CHUNK=auto REMAT=3 PREFIX_CACHE=true XLA_OPT=1 BETA= LR= CRITIC_LR= WARMUP=1 GRAD_CLIP= DATA=polaris|math|countdown
 #   EVAL_SETS=math500:4:3072,... EVAL_EVERY=25 (tools/rl_eval.py) VLLM_MAX_LEN=0 TIS=0 TIS_CAP=2.0
 #   COUNTDOWN_NUMBERS=4 HER=0 HER_GOALS=1 HER_COEF=1.0 HER_SOURCE=answer|trajectory (Countdown hindsight relabeling, tools/hindsight.py) COUNTDOWN_TARGETS=10-100
 # Storage: HF weights -> worker-local $SCRATCH; checkpoints/tensorboard -> $CKPT_ROOT/tunix/$RUN_NAME[/w-N] (GCS);
@@ -153,6 +153,11 @@ fi
 if [ -n "$CRITIC_LR" ]; then
   OPT_ARGS+=(rl_training_config.critic_optimizer_config.peak_value="$CRITIC_LR" rl_training_config.critic_optimizer_config.end_value="$CRITIC_LR"
              rl_training_config.critic_optimizer_config.warmup_steps="$WARMUP" rl_training_config.critic_optimizer_config.decay_steps="$DECAY_STEPS")
+fi
+GRAD_CLIP=$(pick GRAD_CLIP "")       # max_grad_norm override for actor (and PPO critic); configs default to 0.1
+if [ -n "$GRAD_CLIP" ]; then
+  OPT_ARGS+=(rl_training_config.actor_optimizer_config.max_grad_norm="$GRAD_CLIP")
+  if [ "$ALGO" = ppo ]; then OPT_ARGS+=(rl_training_config.critic_optimizer_config.max_grad_norm="$GRAD_CLIP"); fi
 fi
 if [ -n "$BETA" ]; then OPT_ARGS+=("${ALGO}_config.beta=$BETA"); fi
 if [ "$TIS" = 1 ]; then
