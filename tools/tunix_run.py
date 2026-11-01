@@ -324,6 +324,19 @@ if os.environ.get("PACK", "0") == "1":
 
   _rl_utils_pk.unpad_train_example = _unpad_gathered
 
+  # Tunix builds each packed completion_mask with jnp.asarray(..., copy=False), which the TPU backend rejects
+  # ("cannot convert ... with copy=False"); a host->device transfer always copies. Drop the flag in that module.
+  class _JnpNoCopyFalse:
+
+    def __getattr__(self, name):
+      return getattr(jax.numpy, name)
+
+    @staticmethod
+    def asarray(x, *args, copy=None, **kwargs):
+      return jax.numpy.asarray(x, *args, copy=None if copy is False else copy, **kwargs)
+
+  _rl_utils_pk.jnp = _JnpNoCopyFalse()
+
 if int(os.environ.get("LOGPS_CHUNK") or 0) > 0:
   # Tunix chunks the actor's logits when compute_logps_chunk_size is set, but its reference-model pass (KL term)
   # ignores it and materialises the full [batch, length, vocab] logits, which is what runs out of HBM first at
