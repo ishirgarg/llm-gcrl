@@ -2,7 +2,8 @@
 
   EVAL_SETS="math500:4:3072,amc23:8:8192"  sets, samples per problem, optional completion cap; the sets come from
                                            tools/countdown.py when DATA=countdown, else tools/math_data.py
-  EVAL_EVERY=25                            before training, every N policy updates, and after the last one
+  EVAL_EVERY=25                            before training (unless EVAL_SKIP_STEP0=1), every N policy updates,
+                                           and after the last one
   EVAL_TEMPERATURE / EVAL_TOP_P            sampling for evaluation (default: the training rollout's)
 
 Per set: accuracy (mean over all samples, = avg@k), pass@k, answer-format rate (\\boxed{} / <answer>) and mean
@@ -162,7 +163,8 @@ def install_hooks():
       if getattr(self, "_eval_in_train", False):  # subclass train delegating to the base: evaluate once
         return _orig(self, *args, **kwargs)
       self._eval_in_train = True
-      evaluate(self.rl_engine, 0)  # base policy: vLLM still holds the initial weights
+      if os.environ.get("EVAL_SKIP_STEP0") != "1":  # EVAL_SKIP_STEP0=1: no base-policy eval (e.g. relaunches)
+        evaluate(self.rl_engine, 0)  # base policy: vLLM still holds the initial weights
       out = _orig(self, *args, **kwargs)
       steps = getattr(self.rl_engine, "_eval_syncs", 0)
       if steps and steps not in _done_steps:
