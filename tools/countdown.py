@@ -26,7 +26,7 @@ import os
 import random
 import re
 
-N_NUMBERS = 4
+N_NUMBERS = int(os.environ.get("COUNTDOWN_NUMBERS", "4"))  # numbers per goal (5 = much larger search space)
 NUMBER_RANGE = (1, 99)
 
 

@@ -22,7 +22,7 @@ usable value (every answer right, or none valid) gets zero advantages (it keeps 
   HER_MAX_ACC=1.0     relabel only groups whose real success rate is at most this (relabeling teaches "commit to
                       an answer"; in groups that already succeed that mostly rewards giving up early)
   HER_SOURCE=answer   where relabeled goals come from: "answer" = values of wrong final answers only;
-                      "trajectory" = also complete attempts in the reasoning ("E = v", E over all four numbers,
+                      "trajectory" = also complete attempts in the reasoning ("E = v", E over all the numbers,
                       v correct): the source rollout is cut right after the attempt and answered with E, so a
                       rollout that never answered (e.g. ran out of tokens) still yields a goal. The analogue of
                       HER's "future" strategy: any state the trajectory passed through is an achieved goal.
