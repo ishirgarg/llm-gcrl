@@ -104,6 +104,8 @@ PACK_NORM=$(pick MAX_TOKENS 1024)   # Dr. GRPO loss constant under packing (= co
 export PACK PACK_NORM
 OVERLONG_FILTER=$(pick OVERLONG_FILTER 0)   # 1 (GRPO): truncated rollouts get no gradient (DAPO), tools/tunix_run.py
 export OVERLONG_FILTER
+VL_NORM=$(pick VL_NORM 0); VL_ALPHA=$(pick VL_ALPHA 1)   # 1 (GRPO): length-normalized advantages (VL Norm), tools/tunix_run.py
+export VL_NORM VL_ALPHA
 VLLM_MAX_LEN=$(pick VLLM_MAX_LEN 0)  # >0: vLLM max_model_len (for evaluation longer than training rollouts)
 export VLLM_MAX_LEN
 MODEL_NAME=$(echo "${MODEL#*/}" | tr 'A-Z' 'a-z')   # Qwen/Qwen3-4B -> qwen3-4b (Tunix model name)

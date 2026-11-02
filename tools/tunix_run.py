@@ -173,6 +173,29 @@ if os.environ.get("OVERLONG_FILTER") == "1" and os.environ.get("TUNIX_ALGO", "gr
 
   _gl_ol.GRPOLearner._generate_and_compute_advantage = _gen_adv_overlong  # pylint: disable=protected-access
 
+if os.environ.get("VL_NORM") == "1" and os.environ.get("TUNIX_ALGO", "grpo") == "grpo":
+  # VL Norm (arXiv 2509.07558): each response's advantage is scaled by (L / mean L)^-alpha, normalized to mean 1 over
+  # the batch as in the authors' code. With the per-sequence token-sum loss, alpha=1 gives every response the same
+  # total pull regardless of length; alpha=0 is Dr. GRPO.
+  import numpy as _np_vl  # pylint: disable=g-import-not-at-top
+  import dataclasses as _dc_vl  # pylint: disable=g-import-not-at-top
+  from tunix.rl import rl_cluster as _rc_vl  # pylint: disable=g-import-not-at-top
+  from tunix.rl.grpo import grpo_learner as _gl_vl  # pylint: disable=g-import-not-at-top
+  _vl_alpha = float(os.environ.get("VL_ALPHA", "1"))
+  _orig_gen_adv_vl = _gl_vl.GRPOLearner._generate_and_compute_advantage  # pylint: disable=protected-access
+
+  def _gen_adv_vl_norm(self, training_input, mode=_rc_vl.Mode.TRAIN):
+    example = _orig_gen_adv_vl(self, training_input, mode)
+    if mode != _rc_vl.Mode.TRAIN:
+      return example
+    ids = _np_vl.asarray(example.completion_ids)
+    lengths = _np_vl.maximum((ids != self.rl_engine.rollout.pad_id()).sum(axis=1), 1).astype(_np_vl.float32)
+    weights = (lengths / lengths.mean()) ** -_vl_alpha
+    advantages = _np_vl.asarray(example.advantages) * (weights / weights.mean())
+    return _dc_vl.replace(example, advantages=jax.numpy.asarray(advantages))
+
+  _gl_vl.GRPOLearner._generate_and_compute_advantage = _gen_adv_vl_norm  # pylint: disable=protected-access
+
 if os.environ.get("HER") == "1":
   # Goal-conditioned GRPO with hindsight relabeling on Countdown (tools/hindsight.py): each group also trains on
   # copies relabeled to the values its wrong answers reached, importance-corrected by the TIS weights.

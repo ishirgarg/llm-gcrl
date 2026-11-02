@@ -6,8 +6,8 @@
                                            and after the last one
   EVAL_TEMPERATURE / EVAL_TOP_P            sampling for evaluation (default: the training rollout's)
 
-Per set: accuracy (mean over all samples, = avg@k), pass@k, answer-format rate (\\boxed{} / <answer>) and mean
-completion length, appended
+Per set: accuracy (mean over all samples, = avg@k), pass@k, answer-format rate (\\boxed{} / <answer>), mean
+completion length and accuracy at lower completion caps (by_cap, in the file only), appended
 to $LOG_ROOT/$RUN_NAME/eval.jsonl by process 0 and buffered to the metrics logger as eval/<set>/<metric>.
 Evaluation time is left out of the eff/* step times. install() wraps RLEngine.generate's raw version before
 tunix_eff instruments it, so evaluation generations are not counted as rollouts.
@@ -98,12 +98,15 @@ def evaluate(engine, step):
           "mean_len": float(np.mean([len(t) for t in out.tokens])),
           "max_len_frac": float(np.mean([len(t) >= cap for t in out.tokens])),
       }
+      lengths = np.array([len(t) for t in out.tokens])
+      by_cap = {c: {"acc": float((correct.ravel() & (lengths <= c)).mean()), "over": float((lengths > c).mean())}
+                for c in range(4096, cap, 4096)}  # what this eval would have scored at each lower cap
       dt = time.perf_counter() - t0
       if jax.process_index() == 0:
         path = os.path.join(os.environ["LOG_ROOT"], os.environ["RUN_NAME"], "eval.jsonl")
         with open(path, "a") as f:
           f.write(json.dumps({"step": step, "set": name, "n_problems": len(items), "samples": k, **m,
-                              "time_s": round(dt, 1)}) + "\n")
+                              "by_cap": by_cap, "time_s": round(dt, 1)}) + "\n")
         with open(path.replace("eval.jsonl", "eval_samples.jsonl"), "a") as f:  # a few completions to inspect
           for i in range(0, min(len(prompts), 4 * k), k):
             f.write(json.dumps({"step": step, "set": name, "answer": items[i // k][1], "score": float(scores.flat[i]),

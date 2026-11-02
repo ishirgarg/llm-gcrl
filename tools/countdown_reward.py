@@ -4,6 +4,7 @@ reward = 1 if the <answer> expression uses exactly the given numbers and evaluat
 Per-step stats over the real (not hindsight-relabeled) rollouts go to $LOG_ROOT/$RUN_NAME/rewards.jsonl:
 acc, answer_rate (has an <answer> tag) and valid_rate (a valid expression over the numbers, right or wrong).
 """
+import itertools
 import json
 import os
 import time
@@ -18,9 +19,12 @@ def _log(goals, completions, scores, relabeled):
   if not real:
     return
   n = len(real)
+  groups = [[scores[i] for i in g] for _, g in itertools.groupby(real, key=lambda i: goals[i])]  # rows of a goal are adjacent
   rec = {"time": round(time.time(), 1), "n": n, "acc": sum(scores[i] for i in real) / n,
          "answer_rate": sum(countdown.formatted(completions[i]) for i in real) / n,
-         "valid_rate": sum(countdown.achieved(goals[i], completions[i]) is not None for i in real) / n}
+         "valid_rate": sum(countdown.achieved(goals[i], completions[i]) is not None for i in real) / n,
+         "all_right": sum(all(g) for g in groups) / len(groups),  # such groups have zero advantage (no gradient)
+         "all_wrong": sum(not any(g) for g in groups) / len(groups)}
   try:
     with open(os.path.join(os.environ["LOG_ROOT"], os.environ["RUN_NAME"], "rewards.jsonl"), "a") as f:
       f.write(json.dumps(rec) + "\n")
