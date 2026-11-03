@@ -16,7 +16,7 @@
 #   TRAIN_MICRO=auto LOGPS_MICRO=1 ROLLOUT_MICRO=16   (micro-batches, in prompts)   OFFLOAD=false FORCE_FULL=0
 #   LOGPS_CHUNK=auto REMAT=3 PREFIX_CACHE=true XLA_OPT=1 BETA= LR= CRITIC_LR= WARMUP=1 GRAD_CLIP=
 #   EVAL_SETS=countdown@256:2,... EVAL_EVERY=25 (tools/rl_eval.py) VLLM_MAX_LEN=0 TIS=0 TIS_CAP=2.0
-#   COUNTDOWN_NUMBERS=4 HER=0 HER_GOALS=1 HER_COEF=1.0 HER_SOURCE=answer|trajectory (Countdown hindsight relabeling, tools/hindsight.py) COUNTDOWN_TARGETS=10-100
+#   COUNTDOWN_NUMBERS=4|3-4 COUNTDOWN_THINKING=0 HER=0 HER_GOALS=1 HER_COEF=1.0 HER_SOURCE=answer|trajectory (Countdown hindsight relabeling, tools/hindsight.py) COUNTDOWN_TARGETS=10-100
 # Storage: HF weights -> worker-local $SCRATCH; checkpoints/tensorboard -> $CKPT_ROOT/tunix/$RUN_NAME[/w-N] (GCS);
 # metrics -> wandb + $LOG_ROOT/$RUN_NAME/eff[-w-N].jsonl (NFS).
 set -euo pipefail
@@ -87,8 +87,8 @@ LR=$(pick LR "")                     # actor peak LR override; CRITIC_LR likewis
 CRITIC_LR=$(pick CRITIC_LR "")
 WARMUP=$(pick WARMUP 1)
 COUNTDOWN_TARGETS=$(pick COUNTDOWN_TARGETS 10-100); COUNTDOWN_MAX_SOLUTIONS=$(pick COUNTDOWN_MAX_SOLUTIONS 0)
-COUNTDOWN_NUMBERS=$(pick COUNTDOWN_NUMBERS 4)
-export COUNTDOWN_TARGETS COUNTDOWN_MAX_SOLUTIONS COUNTDOWN_NUMBERS
+COUNTDOWN_NUMBERS=$(pick COUNTDOWN_NUMBERS 4); COUNTDOWN_THINKING=$(pick COUNTDOWN_THINKING 0)
+export COUNTDOWN_TARGETS COUNTDOWN_MAX_SOLUTIONS COUNTDOWN_NUMBERS COUNTDOWN_THINKING
 SAMPLING_KWARGS=$(pick SAMPLING_KWARGS "")   # extra vLLM SamplingParams, python dict body, e.g. 'stop_token_ids': [151645]
 CRITIC_MICRO=${CRITIC_MICRO:-$((TRAIN_MICRO * GROUP))}   # PPO value pass: sequences per slice
 export CRITIC_MICRO
