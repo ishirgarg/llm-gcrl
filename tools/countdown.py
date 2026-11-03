@@ -15,8 +15,10 @@ goal that hindsight relabeling can use; the reward is still exact-match only.
 Tunix data module: create_dataset() yields training goals; eval_set(name) gives held-out goals for tools/rl_eval.py.
 Goals are generated from seeds (no download): random numbers, combined in a random order with random operations
 whose intermediate results stay positive integers, so every target is reachable. COUNTDOWN_TARGETS="lo-hi" sets
-the target range (default 10-100, as in TinyZero's Countdown-Tasks); COUNTDOWN_MAX_SOLUTIONS=n keeps only goals with
-at most n solution paths (n_solutions, an exhaustive search), the knob for sparse rewards.
+the target range (default 10-100, as in TinyZero's Countdown-Tasks); COUNTDOWN_NUMBERS="3-4" draws each goal's
+count of numbers uniformly (or a single count, default 4); COUNTDOWN_MAX_SOLUTIONS=n keeps only goals with at most n
+solution paths (n_solutions, an exhaustive search), the knob for sparse rewards. COUNTDOWN_THINKING=1 keeps reasoning
+on for hybrid models such as Qwen3-0.6B, whose chat template otherwise prefills an empty <think> block.
 """
 import ast
 import dataclasses
@@ -26,8 +28,13 @@ import os
 import random
 import re
 
-N_NUMBERS = int(os.environ.get("COUNTDOWN_NUMBERS", "4"))  # numbers per goal (5 = much larger search space)
 NUMBER_RANGE = (1, 99)
+
+
+def number_counts():
+  """(lo, hi) numbers per goal: COUNTDOWN_NUMBERS="3-4" or "5" (more numbers = a much larger search space)."""
+  lo, _, hi = os.environ.get("COUNTDOWN_NUMBERS", "4").partition("-")
+  return int(lo), int(hi or lo)
 
 
 def target_range():
@@ -60,11 +67,12 @@ USER_TEMPLATE = (
 
 @functools.lru_cache(maxsize=None)
 def _chat_template(model_id):
-  """The model's chat template around a {USER} placeholder (thinking disabled for hybrid models)."""
+  """The model's chat template around a {USER} placeholder (hybrid models: thinking only if COUNTDOWN_THINKING=1)."""
   from transformers import AutoTokenizer  # pylint: disable=g-import-not-at-top
   tok = AutoTokenizer.from_pretrained(model_id)
   return tok.apply_chat_template([{"role": "user", "content": "{USER}"}], tokenize=False,
-                                 add_generation_prompt=True, enable_thinking=False)
+                                 add_generation_prompt=True,
+                                 enable_thinking=os.environ.get("COUNTDOWN_THINKING") == "1")
 
 
 def prompt(goal, model_id=None):
@@ -157,11 +165,13 @@ def max_solutions():
 
 
 def sample_goal(rng, targets=None, max_sol=None):
-  """Random reachable goal: combine N_NUMBERS random numbers pairwise with random valid operations, optionally
-  rejecting goals with more than max_sol solution paths."""
+  """Random reachable goal: combine random numbers pairwise with random valid operations, optionally rejecting goals
+  with more than max_sol solution paths."""
   lo, hi = targets or target_range()
+  fewest, most = number_counts()
   while True:
-    numbers = [rng.randint(*NUMBER_RANGE) for _ in range(N_NUMBERS)]
+    count = fewest if fewest == most else rng.randint(fewest, most)  # a fixed count draws nothing: same goals as before
+    numbers = [rng.randint(*NUMBER_RANGE) for _ in range(count)]
     pool = list(numbers)
     while len(pool) > 1:
       a, b = sorted(rng.sample(pool, 2), reverse=True)

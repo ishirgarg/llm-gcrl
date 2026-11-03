@@ -17,6 +17,7 @@ import os
 QWEN3_4B_PARAMS = 4.02e9
 # Parameters counted by the 6N MFU convention (MoE: active parameters per token).
 MODEL_PARAMS = {
+    "Qwen/Qwen3-0.6B": 0.6e9,
     "Qwen/Qwen3-1.7B": 2.03e9,
     "Qwen/Qwen3-4B": QWEN3_4B_PARAMS,
     "Qwen/Qwen3-4B-Instruct-2507": QWEN3_4B_PARAMS,
