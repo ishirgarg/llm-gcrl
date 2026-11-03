@@ -193,7 +193,7 @@ def _goals(n, seed, targets=None, max_sol=None):
 def create_dataset(model_id=None, seed=0, size=None):
   import grain  # pylint: disable=g-import-not-at-top
   seed = int(os.environ.get("DATA_SEED", seed))
-  size = size or (4_000 if max_solutions() else 50_000)  # solution counting makes hard goals slower to generate
+  size = size or (4_000 if max_solutions() else 100_000)  # solution counting makes hard goals slower to generate
   goals = _goals(size, f"countdown-train-{seed}", max_sol=max_solutions())
   rows = [{"prompts": prompt(g, model_id), **g.encode()} for g in goals]
   return grain.MapDataset.source(rows)
