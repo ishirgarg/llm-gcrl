@@ -14,8 +14,8 @@
 #   MODEL=Qwen/Qwen3-4B      HF id (Qwen3 dense or MoE)
 #   MAX_TOKENS=1024 MAX_PROMPT=768 NUM_BATCHES=4 VLLM_HBM=0.4 MESH=1x4 VLLM_MAX_SEQS=128 VLLM_MAX_BATCHED=8192
 #   TRAIN_MICRO=auto LOGPS_MICRO=1 ROLLOUT_MICRO=16   (micro-batches, in prompts)   OFFLOAD=false FORCE_FULL=0
-#   LOGPS_CHUNK=auto REMAT=3 PREFIX_CACHE=true XLA_OPT=1 BETA= LR= CRITIC_LR= WARMUP=1 GRAD_CLIP=
-#   EVAL_SETS=countdown@256:2,... EVAL_EVERY=25 (tools/rl_eval.py) VLLM_MAX_LEN=0 TIS=0 TIS_CAP=2.0
+#   LOGPS_CHUNK=auto REMAT=3 PREFIX_CACHE=false XLA_OPT=1 BETA= LR= CRITIC_LR= WARMUP=1 GRAD_CLIP= DATA=polaris|math|countdown
+#   EVAL_SETS=math500:4:3072,... EVAL_EVERY=25 (tools/rl_eval.py) VLLM_MAX_LEN=0 TIS=0 TIS_CAP=2.0
 #   COUNTDOWN_NUMBERS=4|3-4 COUNTDOWN_THINKING=0 HER=0 HER_GOALS=1 HER_COEF=1.0 HER_SOURCE=answer|trajectory (Countdown hindsight relabeling, tools/hindsight.py) COUNTDOWN_TARGETS=10-100
 # Storage: HF weights -> worker-local $SCRATCH; checkpoints/tensorboard -> $CKPT_ROOT/tunix/$RUN_NAME[/w-N] (GCS);
 # metrics -> wandb + $LOG_ROOT/$RUN_NAME/eff[-w-N].jsonl (NFS).
@@ -80,7 +80,7 @@ VLLM_RESHARD_CHUNK=$(pick VLLM_RESHARD_CHUNK 16)  # weight sync in chunks of N t
 LOGPS_CHUNK=$(pick LOGPS_CHUNK $([ "$(pick MAX_TOKENS 1024)" -ge 4096 ] && echo 1024 || echo 0))
 export LOGPS_CHUNK                   # tools/tunix_run.py gives the reference (KL) pass the same chunking
 REMAT=$(pick REMAT 3)                # trainer activation remat: 3 = whole decoder layer, 2 = attention block, 1 = none
-PREFIX_CACHE=$(pick PREFIX_CACHE true)  # vLLM prefix caching: a prompt's 8 rollouts share its prefill
+PREFIX_CACHE=$(pick PREFIX_CACHE false)  # vLLM prefix caching corrupts rollouts that hit it (they lose the end of the prompt): keep off
 XLA_OPT=$(pick XLA_OPT 1)            # 1: async collectives / collective-compute overlap XLA flags (v5e, as MaxText)
 BETA=$(pick BETA "")                 # KL coefficient override (configs default to 0: no KL, no reference pass)
 LR=$(pick LR "")                     # actor peak LR override; CRITIC_LR likewise (constant after WARMUP steps)
