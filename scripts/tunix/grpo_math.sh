@@ -85,6 +85,9 @@ DATA=$(pick DATA polaris)            # polaris (POLARIS-53K) | math (MATH L3-5 t
 export DATA                          # tools/rl_eval.py picks its evaluation sets by it
 COUNTDOWN_TARGETS=$(pick COUNTDOWN_TARGETS 10-100); COUNTDOWN_MAX_SOLUTIONS=$(pick COUNTDOWN_MAX_SOLUTIONS 0)
 COUNTDOWN_NUMBERS=$(pick COUNTDOWN_NUMBERS 4); COUNTDOWN_THINKING=$(pick COUNTDOWN_THINKING 0)
+COUNTDOWN_PROMPT=$(pick COUNTDOWN_PROMPT ""); COUNTDOWN_FORMAT_SCORE=$(pick COUNTDOWN_FORMAT_SCORE 0); REWARD_PROBE=$(pick REWARD_PROBE "")
+export COUNTDOWN_PROMPT COUNTDOWN_FORMAT_SCORE REWARD_PROBE
+MINI_BATCH=$(pick MINI_BATCH $(pick BATCH 16))   # prompts per optimizer update (default: one update per rollout batch)
 export COUNTDOWN_TARGETS COUNTDOWN_MAX_SOLUTIONS COUNTDOWN_NUMBERS COUNTDOWN_THINKING
 SAMPLING_KWARGS=$(pick SAMPLING_KWARGS "")   # extra vLLM SamplingParams, python dict body, e.g. 'stop_token_ids': [151645]
 CRITIC_MICRO=${CRITIC_MICRO:-$((TRAIN_MICRO * GROUP))}   # PPO value pass: sequences per slice
@@ -224,7 +227,7 @@ TUNIX_ALGO=$ALGO python3 "$REPO/tools/tunix_run.py" \
   vllm_config.max_num_seqs="$VLLM_MAX_SEQS" \
   vllm_config.max_num_batched_tokens="$VLLM_MAX_BATCHED" \
   batch_size="$BATCH" \
-  rl_training_config.mini_batch_size="$BATCH" \
+  rl_training_config.mini_batch_size="$MINI_BATCH" \
   "${ALGO_ARGS[@]}" \
   rl_training_config.train_micro_batch_size="$TRAIN_MICRO" \
   rl_training_config.compute_logps_micro_batch_size="$LOGPS_MICRO" \

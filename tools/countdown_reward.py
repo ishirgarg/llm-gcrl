@@ -37,6 +37,9 @@ def countdown_reward(prompts, completions, numbers, target, relabeled=None, **kw
   del prompts, kwargs
   goals = [countdown.Goal.decode(n, t) for n, t in zip(numbers, target)]
   scores = [countdown.reward(g, c) for g, c in zip(goals, completions)]
+  format_score = float(os.environ.get("COUNTDOWN_FORMAT_SCORE", "0"))  # TinyZero: 0.1 for any <answer> tag
+  if format_score:
+    scores = [max(s, format_score * countdown.formatted(c)) for s, c in zip(scores, completions)]
   probe = os.environ.get("REWARD_PROBE")  # pipeline check: reward avoiding a word, whatever the answer
   if probe:
     scores = [float(probe not in c.lower()) for c in completions]

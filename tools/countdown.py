@@ -75,7 +75,20 @@ def _chat_template(model_id):
                                  enable_thinking=os.environ.get("COUNTDOWN_THINKING") == "1")
 
 
+# TinyZero's prompt for base models (COUNTDOWN_PROMPT=tinyzero): no chat template, the reasoning block is prefilled.
+TINYZERO_TEMPLATE = (
+    "A conversation between User and Assistant. The user asks a question, and the Assistant solves it. The assistant "
+    "first thinks about the reasoning process in the mind and then provides the user with the answer.\n"
+    "User: Using the numbers {numbers}, create an equation that equals {target}. You can use basic arithmetic operations "
+    "(+, -, *, /) and each number can only be used once. Show your work in <think> </think> tags. And return the final "
+    "answer in <answer> </answer> tags, for example <answer> (1 + 2) / 3 </answer>.\n"
+    "Assistant: Let me solve this step by step.\n<think>"
+)
+
+
 def prompt(goal, model_id=None):
+  if os.environ.get("COUNTDOWN_PROMPT") == "tinyzero":
+    return TINYZERO_TEMPLATE.format(numbers=list(goal.numbers), target=goal.target)
   user = USER_TEMPLATE.format(numbers=list(goal.numbers), target=goal.target)
   return _chat_template(model_id or os.environ.get("MODEL", "Qwen/Qwen3-4B-Instruct-2507")).replace("{USER}", user)
 
