@@ -107,6 +107,11 @@ def evaluate(engine, step):
         with open(path, "a") as f:
           f.write(json.dumps({"step": step, "set": name, "n_problems": len(items), "samples": k, **m,
                               "by_cap": by_cap, "time_s": round(dt, 1)}) + "\n")
+        if os.environ.get("EVAL_DUMP") == "1":  # every completion, for auditing the metrics
+          with open(path.replace("eval.jsonl", f"eval_dump_{step}.jsonl"), "w") as f:
+            for i, (text, tokens) in enumerate(zip(out.text, out.tokens)):
+              f.write(json.dumps({"row": i, "answer": items[i // k][1], "score": float(scores.flat[i]),
+                                  "n_tokens": len(tokens), "text": text}) + "\n")
         with open(path.replace("eval.jsonl", "eval_samples.jsonl"), "a") as f:  # a few completions to inspect
           for i in range(0, min(len(prompts), 4 * k), k):
             f.write(json.dumps({"step": step, "set": name, "answer": items[i // k][1], "score": float(scores.flat[i]),
