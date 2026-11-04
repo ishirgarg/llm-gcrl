@@ -37,5 +37,8 @@ def countdown_reward(prompts, completions, numbers, target, relabeled=None, **kw
   del prompts, kwargs
   goals = [countdown.Goal.decode(n, t) for n, t in zip(numbers, target)]
   scores = [countdown.reward(g, c) for g, c in zip(goals, completions)]
+  probe = os.environ.get("REWARD_PROBE")  # pipeline check: reward avoiding a word, whatever the answer
+  if probe:
+    scores = [float(probe not in c.lower()) for c in completions]
   _log(goals, completions, scores, relabeled if relabeled is not None else [False] * len(scores))
   return scores
