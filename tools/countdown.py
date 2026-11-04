@@ -195,6 +195,9 @@ def create_dataset(model_id=None, seed=0, size=None):
   seed = int(os.environ.get("DATA_SEED", seed))
   size = size or (4_000 if max_solutions() else 100_000)  # solution counting makes hard goals slower to generate
   goals = _goals(size, f"countdown-train-{seed}", max_sol=max_solutions())
+  fixed = int(os.environ.get("COUNTDOWN_FIXED_GOALS", "0"))  # overfit test: repeat the first n goals
+  if fixed:
+    goals = (goals[:fixed] * (size // fixed + 1))[:size]
   rows = [{"prompts": prompt(g, model_id), **g.encode()} for g in goals]
   return grain.MapDataset.source(rows)
 
@@ -205,13 +208,16 @@ def eval_set(name, model_id=None):
     countdown                  the training distribution (COUNTDOWN_TARGETS, COUNTDOWN_MAX_SOLUTIONS)
     countdown_<lo>_<hi>        targets in [lo, hi], any number of solutions
     countdown_hard_<lo>_<hi>   targets in [lo, hi] with a unique solution path
+    countdown_train            the first training goals (what COUNTDOWN_FIXED_GOALS repeats)
 
   The answer string is the encoded goal ("3 7 25 50|123").
   """
   name, _, size = name.partition("@")  # "countdown@128": the first 128 goals (long-reasoning runs evaluate fewer)
   n = int(size or 256)
   parts = name.split("_")
-  if len(parts) == 1:
+  if name == "countdown_train":
+    goals = _goals(n, f"countdown-train-{int(os.environ.get('DATA_SEED', 0))}", max_sol=max_solutions())
+  elif len(parts) == 1:
     goals = _goals(n, "countdown-eval", max_sol=max_solutions())
   else:
     hard = parts[1] == "hard"
