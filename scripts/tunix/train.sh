@@ -158,8 +158,9 @@ if [ "$MODE" = lora ]; then
 fi
 OPT_ARGS=()
 DECAY_STEPS=$(( NUM_BATCHES > WARMUP ? NUM_BATCHES : WARMUP + 1 ))   # optax needs decay_steps > warmup_steps
-if [ -n "$LR" ]; then  # constant LR after a linear warmup (cosine from peak to peak)
-  OPT_ARGS+=(rl_training_config.actor_optimizer_config.peak_value="$LR" rl_training_config.actor_optimizer_config.end_value="$LR"
+LR_END=$(pick LR_END "$LR")          # cosine decay to LR_END over the run (default: constant LR after warmup)
+if [ -n "$LR" ]; then  # linear warmup, then cosine from LR to LR_END
+  OPT_ARGS+=(rl_training_config.actor_optimizer_config.peak_value="$LR" rl_training_config.actor_optimizer_config.end_value="$LR_END"
              rl_training_config.actor_optimizer_config.warmup_steps="$WARMUP" rl_training_config.actor_optimizer_config.decay_steps="$DECAY_STEPS")
 fi
 if [ -n "$CRITIC_LR" ]; then
