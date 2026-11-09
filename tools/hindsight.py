@@ -47,6 +47,7 @@ import jax.numpy as jnp
 import numpy as np
 from tunix.rl import rl_cluster
 from tunix.rl import rl_learner
+from tunix.rl import utils as rl_utils
 from tunix.rl.grpo import grpo_learner
 
 GOALS = int(os.environ.get("HER_GOALS", "1"))
@@ -168,7 +169,8 @@ def _augment(learner, training_input, out):
         break
       rewrites = None
       if cut is not None:
-        close_think = thinking and "</think>" not in group_texts[i][:cut]
+        opened = thinking or "<think>" in group_texts[i][:cut]  # the model may open the block itself
+        close_think = opened and "</think>" not in group_texts[i][:cut]
         r = _rewrite(engine, out.tokens[rows[i]], logprobs[rows[i]], group_texts[i], cut, expr, max_len, close_think)
         if r is None:
           continue
@@ -265,3 +267,12 @@ def install():
     return orig_process(self, micro_batches, micro_batch_sizes, mode)
 
   rl_learner.RLLearner._process_accumulated_batches = process_hindsight  # pylint: disable=protected-access
+
+  # Sequence packing ends an update every mini_batch_size * num_generations sequences; the relabeled copies multiply
+  # the rows by (1 + HER_GOALS), so count them too or a step would take several optimizer updates.
+  orig_pack = rl_utils.pack_sequences
+
+  def pack_hindsight(*args, sequences_per_update, **kwargs):
+    return orig_pack(*args, sequences_per_update=sequences_per_update * (1 + GOALS), **kwargs)
+
+  rl_utils.pack_sequences = pack_hindsight
