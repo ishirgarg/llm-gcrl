@@ -197,10 +197,8 @@ if os.environ.get("VL_NORM") == "1" and os.environ.get("TUNIX_ALGO", "grpo") == 
   _gl_vl.GRPOLearner._generate_and_compute_advantage = _gen_adv_vl_norm  # pylint: disable=protected-access
 
 if os.environ.get("HER") == "1":
-  # Goal-conditioned GRPO with hindsight relabeling on Countdown (tools/hindsight.py): each group also trains on
-  # copies relabeled to the values its wrong answers reached, importance-corrected by the TIS weights.
-  if os.environ.get("TUNIX_ALGO", "grpo") != "grpo":
-    raise ValueError("HER=1 needs TUNIX_ALGO=grpo")
+  # Goal-conditioned RL with hindsight relabeling on Countdown (tools/hindsight.py), GRPO or PPO: each group also
+  # trains on copies relabeled to values its rollouts reached, importance-corrected by the TIS weights.
   import hindsight  # pylint: disable=g-import-not-at-top
   hindsight.install()
 

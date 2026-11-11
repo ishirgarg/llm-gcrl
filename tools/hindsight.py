@@ -128,7 +128,7 @@ def _encode_prompt(engine, text, width):
 def _augment(learner, training_input, out):
   """Append HER_GOALS relabeled copies after every group: rows [g_0 | g'_0,1..K | g_1 | g'_1,1..K | ...]."""
   engine = learner.rl_engine
-  g = learner.algo_config.num_generations
+  g = learner._num_generations()  # pylint: disable=protected-access
   max_len = engine.get_rollout_config(rl_cluster.Mode.TRAIN).max_tokens_to_generate
   n_groups = len(out.text) // g
   prompts = list(training_input["prompts"])
@@ -204,11 +204,12 @@ def _host(x):
 
 
 def _log_stats(learner, example, training_input):
-  weights = None if example.sampler_is_weights is None else _host(example.sampler_is_weights)
+  weights = getattr(example, "sampler_is_weights", None)  # GRPO only; PPO applies TIS to its advantages
+  weights = None if weights is None else _host(weights)
   mask = _host(example.completion_mask).astype(np.float32)
   if jax.process_index() != 0 or not os.environ.get("RUN_NAME"):
     return
-  g = learner.algo_config.num_generations
+  g = learner._num_generations()  # pylint: disable=protected-access
   kind = learner._her_kind  # pylint: disable=protected-access
   wins = np.array([countdown.reward(countdown.Goal.decode(nu, t), c) for nu, t, c in zip(
       training_input["numbers"], training_input["target"], learner._her_text)])  # pylint: disable=protected-access
@@ -229,7 +230,15 @@ def _log_stats(learner, example, training_input):
 
 
 def install():
-  orig_gen_adv = grpo_learner.GRPOLearner._generate_and_compute_advantage  # pylint: disable=protected-access
+  """GRPO (default) or PPO (TUNIX_ALGO=ppo). PPO samples one rollout per prompt, so a 'group' is one rollout and its
+  relabeled copy is that rollout alone (no other rollouts are rescored); the critic and the TIS pass see the
+  relabeled prompts because the relabeling happens right after generation."""
+  if os.environ.get("TUNIX_ALGO", "grpo") == "ppo":
+    from tunix.rl.ppo import ppo_learner  # pylint: disable=g-import-not-at-top
+    learner_cls = ppo_learner.PPOLearner
+  else:
+    learner_cls = grpo_learner.GRPOLearner
+  orig_gen_adv = learner_cls._generate_and_compute_advantage  # pylint: disable=protected-access
 
   def gen_adv_hindsight(self, training_input, mode=rl_cluster.Mode.TRAIN):
     if mode != rl_cluster.Mode.TRAIN:
@@ -240,6 +249,7 @@ def install():
     def generate_and_relabel(*args, **kwargs):
       out = _augment(self, training_input, generate(*args, **kwargs))
       self._her_text = out.text  # pylint: disable=protected-access
+      engine._tis_rollout_logprobs = out.logprobs  # pylint: disable=protected-access  (PPO's TIS reads the rows trained on)
       return out
 
     engine.generate = generate_and_relabel  # instance attribute shadows the (eff-instrumented) class method
@@ -255,14 +265,14 @@ def install():
     _log_stats(self, example, training_input)
     return example
 
-  grpo_learner.GRPOLearner._generate_and_compute_advantage = gen_adv_hindsight  # pylint: disable=protected-access
+  learner_cls._generate_and_compute_advantage = gen_adv_hindsight  # pylint: disable=protected-access
 
   # The learner splits each processed batch back into training micro-batches of the sizes it sampled; with the
   # relabeled copies every micro-batch holds (1 + HER_GOALS)x the rows (its prompts' real and relabeled groups).
   orig_process = rl_learner.RLLearner._process_accumulated_batches  # pylint: disable=protected-access
 
   def process_hindsight(self, micro_batches, micro_batch_sizes, mode):
-    if isinstance(self, grpo_learner.GRPOLearner) and mode == rl_cluster.Mode.TRAIN:
+    if isinstance(self, learner_cls) and mode == rl_cluster.Mode.TRAIN:
       micro_batch_sizes = [n * (1 + GOALS) for n in micro_batch_sizes]
     return orig_process(self, micro_batches, micro_batch_sizes, mode)
 
