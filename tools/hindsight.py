@@ -30,6 +30,9 @@ usable value (every answer right, or none valid) gets zero advantages (it keeps 
                       non-solution ("cannot reach the target, closest is X" is right for goal X only in hindsight),
                       which pushes the policy to give up early; a rewritten attempt instead teaches "answer when an
                       attempt equals the goal", which is right under every goal.
+  HER_PICK=random     which reasoning attempt becomes the relabeled goal: "random" = a random one from the group's
+                      rollouts; "last" = the latest one in its trace (largest cut over the group's rollouts), so the
+                      rewritten rollout keeps as much of its reasoning as possible.
 
 Per-step stats go to $LOG_ROOT/$RUN_NAME/hindsight.jsonl (process 0).
 """
@@ -54,6 +57,8 @@ GOALS = int(os.environ.get("HER_GOALS", "1"))
 COEF = float(os.environ.get("HER_COEF", "1.0"))
 SOURCE = os.environ.get("HER_SOURCE", "answer")
 MAX_ACC = float(os.environ.get("HER_MAX_ACC", "1.0"))
+PICK = os.environ.get("HER_PICK", "random")
+assert PICK in ("random", "last"), f"HER_PICK={PICK}"
 
 
 # A complete attempt in the reasoning: "<expression> = <integer>".
@@ -61,7 +66,8 @@ _CLAIM = re.compile(r"([\d(][\d\s()+\-*/×÷−·]*[\d)])\s*=\s*(\d+)")
 
 
 def _candidates(goal, texts, rng):
-  """Relabeling candidates (value, row, cut, expression), shuffled, final answers (unless HER_SOURCE=attempts) first.
+  """Relabeling candidates (value, row, cut, expression), final answers (unless HER_SOURCE=attempts) first, each list
+  shuffled (attempts latest-first with HER_PICK=last).
 
   Final answers: a valid wrong <answer> reached `value` (cut None: the completion is used as is). With
   HER_SOURCE=trajectory also attempts in the reasoning: a correct "E = value" with E over exactly the goal's
@@ -81,6 +87,8 @@ def _candidates(goal, texts, rng):
           attempts.append((v, i, m.end(), m.group(1).strip()))
   rng.shuffle(answers)
   rng.shuffle(attempts)
+  if PICK == "last":  # latest attempt first (stable sort: ties stay in random order)
+    attempts.sort(key=lambda c: -c[2])
   seen, out = {goal.target}, []
   for c in answers + attempts:
     if c[0] not in seen and lo <= c[0] <= hi:
